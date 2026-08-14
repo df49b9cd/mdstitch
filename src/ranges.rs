@@ -94,6 +94,15 @@ impl CodeBlockRanges {
         Self::position_in_ranges(&self.html_tag_ranges, position)
     }
 
+    /// Like `is_within_html_tag`, but ignores unterminated tags (ranges that
+    /// extend past `len`). Unterminated-tag ranges must not swallow emphasis
+    /// markers that a previous stitch pass appended after the open `<`,
+    /// otherwise stitching is not idempotent (proptest regression
+    /// `fuzz_idempotent_all_option_combinations`: `"_\\<A\t"`).
+    pub fn is_within_closed_html_tag(&self, position: usize, len: usize) -> bool {
+        self.html_tag_ranges.iter().any(|r| r.contains(&position) && r.end <= len)
+    }
+
     /// Binary search to check if `position` falls inside any of the sorted, non-overlapping ranges.
     fn position_in_ranges(ranges: &[std::ops::Range<usize>], position: usize) -> bool {
         // Binary search: find the last range whose start <= position.

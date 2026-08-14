@@ -106,7 +106,9 @@ fn should_skip_underscore(
     if ranges.is_within_link_url(index) {
         return true;
     }
-    if ranges.is_within_html_tag(index) {
+    // Only CLOSED tags hide emphasis markers; unterminated tags must not
+    // swallow closers appended by a previous stitch pass (idempotency).
+    if ranges.is_within_closed_html_tag(index, text.len()) {
         return true;
     }
     // Skip if part of __.

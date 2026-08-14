@@ -301,9 +301,6 @@ pub fn stitch<'a>(text: &'a str, options: &StitchOptions) -> Cow<'a, str> {
 
 /// Fast path: fixed-order pipeline with no dynamic dispatch (used when no custom handlers).
 fn run_builtin_pipeline<'a>(mut result: Cow<'a, str>, options: &StitchOptions) -> Cow<'a, str> {
-    if options.single_tilde {
-        result = apply(result, single_tilde::handle);
-    }
     if options.comparison_operators {
         result = apply(result, comparison_operators::handle);
     }
@@ -361,6 +358,18 @@ fn run_builtin_pipeline<'a>(mut result: Cow<'a, str>, options: &StitchOptions) -
             }
         }
     }
+    // single_tilde runs AFTER links/images: TextOnly link unwrapping can
+    // delete a `[` and expose a lone `~` that must still be escaped for the
+    // pipeline to be idempotent (proptest regression: `"a~[A"`).
+    if options.single_tilde {
+        result = apply(result, single_tilde::handle);
+    }
+    // inline_code runs BEFORE emphasis: closing an open backtick first lets
+    // the emphasis handlers see a real code span and skip its contents,
+    // keeping the pipeline idempotent (proptest regression: `"*A***`a"`).
+    if options.inline_code {
+        result = apply(result, inline_code::handle);
+    }
     if let Some(ref r) = ranges {
         if options.bold_italic {
             result = apply_with(result, |text| {
@@ -381,9 +390,6 @@ fn run_builtin_pipeline<'a>(mut result: Cow<'a, str>, options: &StitchOptions) -
                 emphasis::handle_italic_underscore_with_ranges(text, r)
             });
         }
-        if options.inline_code {
-            result = apply(result, inline_code::handle);
-        }
         if options.strikethrough {
             result = apply_with(result, |text| strikethrough::handle_with_ranges(text, r));
         }
@@ -393,11 +399,8 @@ fn run_builtin_pipeline<'a>(mut result: Cow<'a, str>, options: &StitchOptions) -
         if options.inline_katex {
             result = apply_with(result, |text| katex::handle_inline_with_ranges(text, r));
         }
-    } else if options.inline_code {
-        // Only inline_code can reach here: when `needs_ranges` is false, every
-        // other option in this block is also disabled (they gate `needs_ranges`).
-        result = apply(result, inline_code::handle);
     }
+    // (inline_code already ran before the ranges block; no else-branch needed.)
 
     result
 }

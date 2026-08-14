@@ -32,8 +32,10 @@ pub trait StitchHandler: Send + Sync {
 ///
 /// Lower values run first. Custom handlers default to [`priority::DEFAULT`].
 pub mod priority {
-    /// Priority for single-tilde escaping.
-    pub const SINGLE_TILDE: i32 = 0;
+    /// Priority for single-tilde escaping. Runs after LINKS (20) because link
+    /// unwrapping can expose lone tildes that still need escaping
+    /// (idempotency; proptest regression `"a~[A"`).
+    pub const SINGLE_TILDE: i32 = 25;
     /// Priority for comparison operator escaping in lists.
     pub const COMPARISON_OPERATORS: i32 = 5;
     /// Priority for incomplete HTML tag stripping.
@@ -52,8 +54,10 @@ pub mod priority {
     pub const ITALIC_SINGLE_ASTERISK: i32 = 41;
     /// Priority for single-underscore (`_`) italic completion.
     pub const ITALIC_SINGLE_UNDERSCORE: i32 = 42;
-    /// Priority for inline code (`` ` ``) completion.
-    pub const INLINE_CODE: i32 = 50;
+    /// Priority for inline code (`` ` ``) completion. Runs before emphasis so
+    /// emphasis handlers see closed code spans (idempotency; proptest
+    /// regression `"*A***`a"`).
+    pub const INLINE_CODE: i32 = 26;
     /// Priority for strikethrough (`~~`) completion.
     pub const STRIKETHROUGH: i32 = 60;
     /// Priority for block KaTeX (`$$`) completion.
