@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 079d47a0eb9df2e3124079ec0476bdab87eff371b78ab86e0498bace31638cc0 # shrinks to s = "_\\<A\t", flags = OptionFlags { bold: false, italic: true, bold_italic: false, inline_code: false, strikethrough: false, links: false, images: false, katex: false, inline_katex: false, setext_headings: false, html_tags: false, single_tilde: false, comparison_operators: false, link_mode: Protocol }
