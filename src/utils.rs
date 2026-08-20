@@ -225,7 +225,7 @@ pub fn is_within_link_or_image_url(text: &str, position: usize) -> bool {
             break;
         }
         match bytes[i] {
-            b')' => return false,
+            b')' | b'\n' => return false,
             b'(' => {
                 if i > 0 && bytes[i - 1] == b']' {
                     // We're potentially inside a link/image URL.
@@ -241,7 +241,6 @@ pub fn is_within_link_or_image_url(text: &str, position: usize) -> bool {
                 }
                 return false;
             }
-            b'\n' => return false,
             _ => {}
         }
         if i == 0 {
@@ -301,7 +300,7 @@ pub(crate) fn is_within_html_tag(text: &str, position: usize) -> bool {
             break;
         }
         match bytes[i] {
-            b'>' => return false,
+            b'>' | b'\n' => return false,
             b'<' => {
                 // Must look like a real HTML tag, not inline text like `a<b` or
                 // `name@<example.com`.
@@ -310,7 +309,6 @@ pub(crate) fn is_within_html_tag(text: &str, position: usize) -> bool {
                 }
                 return is_plausible_tag_remainder(&bytes[i + 1..]);
             }
-            b'\n' => return false,
             _ => {}
         }
         if i == 0 {
@@ -331,15 +329,13 @@ pub fn is_horizontal_rule(text: &str, marker_index: usize, marker: u8) -> bool {
     let line_start = bytes[..marker_index]
         .iter()
         .rposition(|&b| b == b'\n')
-        .map(|p| p + 1)
-        .unwrap_or(0);
+        .map_or(0, |p| p + 1);
 
     // Find line end.
     let line_end = bytes[marker_index..]
         .iter()
         .position(|&b| b == b'\n')
-        .map(|p| marker_index + p)
-        .unwrap_or(bytes.len());
+        .map_or(bytes.len(), |p| marker_index + p);
 
     let line = &bytes[line_start..line_end];
 

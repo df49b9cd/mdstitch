@@ -271,8 +271,7 @@ fn is_task_list_marker_start(text: &str, bracket_pos: usize) -> bool {
     let line_start = bytes[..bracket_pos]
         .iter()
         .rposition(|&b| b == b'\n')
-        .map(|p| p + 1)
-        .unwrap_or(0);
+        .map_or(0, |p| p + 1);
 
     if !is_list_marker_line(&text[line_start..bracket_pos]) {
         return false;

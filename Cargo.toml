@@ -47,12 +47,5 @@ path = "src/lib.rs"
 [dev-dependencies.proptest]
 version = "1.11.0"
 
-[lints.clippy]
-dbg_macro = "warn"
-todo = "warn"
-too_many_arguments = "allow"
-type_complexity = "allow"
-
-[lints.rust]
-unexpected_cfgs = "warn"
-unsafe_op_in_unsafe_fn = "warn"
+[lints]
+workspace = true

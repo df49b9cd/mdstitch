@@ -347,7 +347,7 @@ fn should_skip_bold_completion(text: &str, content: &str, marker_index: usize) -
 
     // Check if in a list item with multiline content.
     let before = &text[..marker_index];
-    let line_start = before.rfind('\n').map(|p| p + 1).unwrap_or(0);
+    let line_start = before.rfind('\n').map_or(0, |p| p + 1);
     let line_before = &text[line_start..marker_index];
     if is_list_marker_line(line_before) && content.contains('\n') {
         return true;
@@ -362,7 +362,7 @@ fn should_skip_italic_completion(text: &str, content: &str, marker_index: usize)
     }
 
     let before = &text[..marker_index];
-    let line_start = before.rfind('\n').map(|p| p + 1).unwrap_or(0);
+    let line_start = before.rfind('\n').map_or(0, |p| p + 1);
     let line_before = &text[line_start..marker_index];
     if is_list_marker_line(line_before) && content.contains('\n') {
         return true;

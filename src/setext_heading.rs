@@ -41,7 +41,7 @@ pub fn handle(text: &str) -> Cow<'_, str> {
     // the setext heading (the "-"/"=" run becomes a thematic break or
     // list marker instead).
     let previous = &text[..last_newline_idx];
-    let prev_line_start = previous.rfind('\n').map(|p| p + 1).unwrap_or(0);
+    let prev_line_start = previous.rfind('\n').map_or(0, |p| p + 1);
     let prev_line = &previous[prev_line_start..];
 
     if prev_line.trim().is_empty() {

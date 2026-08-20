@@ -20,8 +20,7 @@ pub fn handle(text: &str) -> Cow<'_, str> {
         let line_end = bytes[line_start..]
             .iter()
             .position(|&b| b == b'\n')
-            .map(|p| line_start + p)
-            .unwrap_or(len);
+            .map_or(len, |p| line_start + p);
 
         let line = &bytes[line_start..line_end];
 
