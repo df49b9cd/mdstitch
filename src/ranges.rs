@@ -100,7 +100,9 @@ impl CodeBlockRanges {
     /// otherwise stitching is not idempotent (proptest regression
     /// `fuzz_idempotent_all_option_combinations`: `"_\\<A\t"`).
     pub fn is_within_closed_html_tag(&self, position: usize, len: usize) -> bool {
-        self.html_tag_ranges.iter().any(|r| r.contains(&position) && r.end <= len)
+        self.html_tag_ranges
+            .iter()
+            .any(|r| r.contains(&position) && r.end <= len)
     }
 
     /// Binary search to check if `position` falls inside any of the sorted, non-overlapping ranges.
