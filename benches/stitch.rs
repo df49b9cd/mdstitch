@@ -59,6 +59,30 @@ fn big_doc(target_bytes: usize) -> String {
     doc
 }
 
+/// Build a ~N-byte document of GENUINELY plain prose: only letters, digits,
+/// commas, periods, semicolons, hyphens, spaces and newlines. None of the
+/// builtin handler trigger characters (`* _ ` ~ $ > < [ ( = !`) appear, so
+/// `stitch()` has nothing to complete — this is the shape a marker-absence
+/// fast path rewards. Ends mid-paragraph (live tail). Used by the
+/// `stitch_plain_*` benches so an early-out shows up in the score (the
+/// marker-heavy `big_doc` corpus would hide it).
+fn plain_doc(target_bytes: usize) -> String {
+    let mut doc = String::with_capacity(target_bytes + 4096);
+    let mut para = 0usize;
+    while doc.len() < target_bytes {
+        doc.push_str(&format!(
+            "Plain prose paragraph number {para}. It has no markdown markers \
+             at all - no emphasis, no code, no math, no links, no html - just \
+             sentences streaming token by token while the model generates \
+             them. This is the common case for most generated text. Paragraph \
+             {para} of the plain corpus ends here.\n\n"
+        ));
+        para += 1;
+    }
+    doc.push_str("Streaming tail in prog");
+    doc
+}
+
 fn options() -> StitchOptions {
     StitchOptions::default()
 }
@@ -93,5 +117,17 @@ fn full_doc(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, incremental, full_doc);
+/// Full-doc pass over PLAIN prose (no markers). A marker-absence fast path in
+/// `stitch()` shows up here: pre-optimization this runs the full pipeline +
+/// `CodeBlockRanges::new` for nothing; post-optimization it returns
+/// `Cow::Borrowed` immediately. Kept at the same 256 KiB size as
+/// `stitch_full_256KiB` for a direct before/after comparison.
+fn plain_full(c: &mut Criterion) {
+    let doc = plain_doc(256 * 1024);
+    c.bench_function("stitch_plain_full_256KiB", |b| {
+        b.iter(|| black_box(stitch(black_box(&doc), &options())))
+    });
+}
+
+criterion_group!(benches, incremental, full_doc, plain_full);
 criterion_main!(benches);

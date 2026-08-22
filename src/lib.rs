@@ -85,6 +85,94 @@ impl HandlerEntry<'_> {
     }
 }
 
+/// Returns `true` when the text contains none of the trigger bytes any enabled
+/// builtin handler could act on, so [`stitch`] can skip `CodeBlockRanges::new`
+/// and the whole builtin pipeline and return the input unchanged
+/// (`Cow::Borrowed`).
+///
+/// Option-aware: a disabled handler's trigger bytes never block the fast path.
+/// Custom handlers (`!options.handlers.is_empty()`) have unknown triggers, so
+/// the caller must NOT take the fast path when any are registered.
+///
+/// Trigger set (per enabled builtin, conservatively inclusive to preserve
+/// parity — `]` is a trigger because the link handler rewrites the
+/// `](stitch:incomplete-link)` sentinel it inserts, and `\` because handlers
+/// consult `is_escaped`):
+/// - emphasis / italic / bold / strikethrough / single_tilde / inline_code:
+///   `*` `_` `` ` `` `~`
+/// - katex / inline_katex / comparison_operators: `$`
+/// - html_tags / comparison_operators: `>` `<`
+/// - links / images: `[` `]` `!` `(`
+/// - setext_headings: `=`
+/// - escapes (consulted by `should_skip_*`): `\`
+fn has_no_enabled_markers(text: &str, options: &StitchOptions) -> bool {
+    let emphasis_like = options.bold
+        || options.italic
+        || options.bold_italic
+        || options.inline_code
+        || options.strikethrough
+        || options.single_tilde;
+    let math_like = options.katex || options.inline_katex || options.comparison_operators;
+    let html_like = options.html_tags || options.comparison_operators;
+    let link_like = options.links || options.images;
+    let setext = options.setext_headings;
+
+    // If no builtin handler is enabled at all, nothing can change the text.
+    if !(emphasis_like || math_like || html_like || link_like || setext) {
+        return true;
+    }
+
+    // For setext, a `-`/`=` underline only triggers the handler when it sits
+    // at the START of the last line (the handler returns `Cow::Borrowed` if
+    // there is no newline, or if the last line trims to something other than
+    // `-`/`--`/`=`/`==`). So track `at_line_start`: a `-`/`=` counts as a
+    // setext trigger only right after a `\n` (or at the very start of the
+    // text), optionally preceded by `< 4` columns of leading whitespace —
+    // matching `leading_indent_cols < 4` in `setext_heading::handle`. A
+    // mid-prose hyphen (`plain-prose word`) is therefore NOT a trigger, so
+    // the fast path still fires on hyphenated prose.
+    let bytes = text.as_bytes();
+    let mut found = false;
+    let mut at_line_start = true;
+    let mut line_indent_cols: usize = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        let hit = match b {
+            b'*' | b'_' | b'`' | b'~' => emphasis_like,
+            b'$' => math_like,
+            b'>' | b'<' => html_like,
+            b'[' | b']' | b'!' | b'(' => link_like,
+            b'=' if setext && at_line_start && line_indent_cols < 4 => true,
+            b'-' if setext && at_line_start && line_indent_cols < 4 => true,
+            // `\` is a trigger only when some handler consults escapes; all
+            // emphasis/strikethrough/single_tilde handlers do, so gate on the
+            // same emphasis_like group (conservative, parity-safe).
+            b'\\' => emphasis_like,
+            _ => false,
+        };
+        if hit {
+            found = true;
+            break;
+        }
+        // Maintain line-start / leading-indent state for the setext check.
+        if b == b'\n' {
+            at_line_start = true;
+            line_indent_cols = 0;
+        } else if at_line_start {
+            match b {
+                b' ' => line_indent_cols += 1,
+                b'\t' => line_indent_cols += 8,
+                _ => {
+                    at_line_start = false;
+                }
+            }
+        }
+        i += 1;
+    }
+    !found
+}
+
 /// Preprocesses streaming markdown text, auto-completing any incomplete syntax.
 ///
 /// Returns `Cow::Borrowed` when no changes are needed (zero-allocation fast path).
@@ -99,6 +187,15 @@ pub fn stitch<'a>(text: &'a str, options: &StitchOptions) -> Cow<'a, str> {
     } else {
         Cow::Borrowed(text)
     };
+
+    // Marker-absence fast path: if no enabled builtin handler has a trigger
+    // byte in the text, there is nothing to complete and no code/math/region
+    // to track — skip the O(n) `CodeBlockRanges::new` (6 full-text scans) and
+    // every handler pass, returning the input unchanged. Custom handlers have
+    // unknown triggers, so this only fires on the builtin pipeline.
+    if options.handlers.is_empty() && has_no_enabled_markers(result.as_ref(), options) {
+        return result;
+    }
 
     // If no custom handlers, use the fast fixed-order pipeline.
     if options.handlers.is_empty() {
