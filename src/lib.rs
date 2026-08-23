@@ -122,40 +122,62 @@ fn has_no_enabled_markers(text: &str, options: &StitchOptions) -> bool {
         return true;
     }
 
-    // For setext, a `-`/`=` underline only triggers the handler when it sits
-    // at the START of the last line (the handler returns `Cow::Borrowed` if
-    // there is no newline, or if the last line trims to something other than
-    // `-`/`--`/`=`/`==`). So track `at_line_start`: a `-`/`=` counts as a
-    // setext trigger only right after a `\n` (or at the very start of the
-    // text), optionally preceded by `< 4` columns of leading whitespace —
-    // matching `leading_indent_cols < 4` in `setext_heading::handle`. A
-    // mid-prose hyphen (`plain-prose word`) is therefore NOT a trigger, so
-    // the fast path still fires on hyphenated prose.
+    // Fast SIMD rejection: for each enabled option group, search the text for
+    // any of its (unconstrained) trigger bytes with memchr/memchr2/memchr3 —
+    // ~15-30x faster per byte than the scalar loop, so plain prose (no triggers)
+    // costs nearly nothing here instead of scanning the whole text by hand.
+    // These are EXACT parity-equivalents of the scalar match arms below them —
+    // a hit means the slow path always would have triggered too.
+    if emphasis_like {
+        // emphasis group triggers: `*`, `_`, `` ` ``, `~`, `\` (escaped consults).
+        if memchr::memchr3(b'*', b'_', b'`', text.as_bytes()).is_some()
+            || memchr::memchr2(b'~', b'\\', text.as_bytes()).is_some()
+        {
+            return false;
+        }
+    }
+    if math_like && memchr::memchr(b'$', text.as_bytes()).is_some() {
+        return false;
+    }
+    if html_like && memchr::memchr2(b'>', b'<', text.as_bytes()).is_some() {
+        return false;
+    }
+    if link_like {
+        // links/images triggers: `[`, `]`, `!`, `(`.
+        if memchr::memchr3(b'[', b']', b'!', text.as_bytes()).is_some()
+            || memchr::memchr(b'(', text.as_bytes()).is_some()
+        {
+            return false;
+        }
+    }
+
+    // Setext underlines (`-`/`=`) are NOT plain byte triggers — the handler
+    // only acts when one sits at the START of the last line (<4 indent cols).
+    // A mid-prose hyphen is not a trigger, so memchr(`-`) would wrongly reject
+    // lots of plain prose. Instead: if setext is off we're done (no trigger
+    // found above). If setext is on, run the precise line-start scan ONLY when
+    // a newline exists (no newline => handler returns Cow::Borrowed anyway).
+    if !setext {
+        return true;
+    }
+    if memchr::memchr(b'\n', text.as_bytes()).is_none() {
+        return true;
+    }
+
+    // Precise setext scan: a `-`/`=` at line start (optional <4 cols of
+    // leading whitespace, matching `setext_heading::handle`'s
+    // `leading_indent_cols < 4` + `trim()`) is a trigger. A mid-line hyphen
+    // (`plain-prose word`) is NOT, so hyphenated prose stays on the fast path.
     let bytes = text.as_bytes();
-    let mut found = false;
     let mut at_line_start = true;
     let mut line_indent_cols: usize = 0;
     let mut i = 0;
     while i < bytes.len() {
         let b = bytes[i];
-        let hit = match b {
-            b'*' | b'_' | b'`' | b'~' => emphasis_like,
-            b'$' => math_like,
-            b'>' | b'<' => html_like,
-            b'[' | b']' | b'!' | b'(' => link_like,
-            b'=' if setext && at_line_start && line_indent_cols < 4 => true,
-            b'-' if setext && at_line_start && line_indent_cols < 4 => true,
-            // `\` is a trigger only when some handler consults escapes; all
-            // emphasis/strikethrough/single_tilde handlers do, so gate on the
-            // same emphasis_like group (conservative, parity-safe).
-            b'\\' => emphasis_like,
-            _ => false,
-        };
+        let hit = matches!(b, b'=' | b'-') && at_line_start && line_indent_cols < 4;
         if hit {
-            found = true;
-            break;
+            return false;
         }
-        // Maintain line-start / leading-indent state for the setext check.
         if b == b'\n' {
             at_line_start = true;
             line_indent_cols = 0;
@@ -163,14 +185,12 @@ fn has_no_enabled_markers(text: &str, options: &StitchOptions) -> bool {
             match b {
                 b' ' => line_indent_cols += 1,
                 b'\t' => line_indent_cols += 8,
-                _ => {
-                    at_line_start = false;
-                }
+                _ => at_line_start = false,
             }
         }
         i += 1;
     }
-    !found
+    true
 }
 
 /// Preprocesses streaming markdown text, auto-completing any incomplete syntax.

@@ -40,6 +40,12 @@ license = "Apache-2.0"
 repository = "https://github.com/df49b9cd/tahoe-gpui"
 resolver = "2"
 
+[dependencies]
+# memchr (SIMD) finds any of the builtin-handler trigger bytes far faster
+# than a scalar scan; used by `has_no_enabled_markers` to make the
+# marker-absence fast path nearly free on plain prose (no triggers found).
+memchr = "2.8"
+
 [lib]
 name = "mdstitch"
 path = "src/lib.rs"
