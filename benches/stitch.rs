@@ -87,6 +87,89 @@ fn options() -> StitchOptions {
     StitchOptions::default()
 }
 
+// --- Canary corpus (P1.3) --------------------------------------------------
+// Worst-case inputs for the paths an optimization is most likely to shortcut.
+// They ride as SEPARATE `canary_*` benches so the scorer excludes them from
+// the primary `bench_geomean_ms` and emits each as its own veto metric —
+// `evo-compare` then rejects any candidate that regresses a canary beyond its
+// noise band, even while the primary improves. This formalizes the E7 lesson:
+// the marker-absence early-out won plain prose but the marker-heavy corpus
+// was the score's blind spot. A canary is the blind spot made visible.
+
+/// Fence-parity worst case: many small fenced code blocks, so the doc is
+/// saturated with ``` markers and `CodeBlockRanges::new` (the dominant
+/// mdstitch cost, ~42% of stitch() per E7 profiling) must scan for parity
+/// across the whole document. A change that skips or mis-scans fences shows
+/// up here first.
+fn canary_fence_doc(target_bytes: usize) -> String {
+    let mut doc = String::with_capacity(target_bytes + 4096);
+    let mut n = 0usize;
+    while doc.len() < target_bytes {
+        doc.push_str(&format!(
+            "```rust\n// fence {n}\nlet x{n} = {n};\n```\n\nprose between \
+             fences {n}.\n\n"
+        ));
+        n += 1;
+    }
+    doc.push_str("Streaming tail in prog");
+    doc
+}
+
+/// Trigger-dense worst case: prose saturated with every builtin handler's
+/// trigger byte (`* _ ~ ` $ < [ (`), all as valid markdown. The memchr /
+/// trigger-scan fast path finds a trigger on nearly every line, so an
+/// early-out keyed on "few markers" cannot fire here — guarding against a
+/// change that trades the many-marker case for the plain-prose win.
+fn canary_emphasis_doc(target_bytes: usize) -> String {
+    let mut doc = String::with_capacity(target_bytes + 4096);
+    let mut n = 0usize;
+    while doc.len() < target_bytes {
+        doc.push_str(&format!(
+            "Row {n}: **bold{n}** and *it{n}* with ~~st{n}~~ plus `code{n}` \
+             and $x^{{2}}_{n}$ then [l{n}](https://e.x/{n}) and \
+             ![i{n}](https://e.x/{n}.png) and <b>t{n}</b>.\n\n"
+        ));
+        n += 1;
+    }
+    doc.push_str("Streaming tail in prog");
+    doc
+}
+
+/// Setext / line-start worst case: many lines that begin with `-` or `=`
+/// (setext underlines and list items), the precise scalar line-start scan
+/// path kept out of the SIMD fast path in E7 x2. Guards that path's cost and
+/// correctness under density.
+fn canary_setext_doc(target_bytes: usize) -> String {
+    let mut doc = String::with_capacity(target_bytes + 4096);
+    let mut n = 0usize;
+    while doc.len() < target_bytes {
+        doc.push_str(&format!(
+            "Heading {n}\n==========\n\n- item {n}a\n- item {n}b\n\n\
+             Sub {n}\n----------\n\n"
+        ));
+        n += 1;
+    }
+    doc.push_str("Streaming tail in prog");
+    doc
+}
+
+/// Canary benches. Named `canary_*` so the scorer splits them out of the
+/// primary geomean and reports each as a veto metric (see evo-score.sh).
+fn canaries(c: &mut Criterion) {
+    let fence = canary_fence_doc(256 * 1024);
+    let emph = canary_emphasis_doc(256 * 1024);
+    let setext = canary_setext_doc(256 * 1024);
+    c.bench_function("canary_fence_256KiB", |b| {
+        b.iter(|| black_box(stitch(black_box(&fence), &options())))
+    });
+    c.bench_function("canary_emphasis_256KiB", |b| {
+        b.iter(|| black_box(stitch(black_box(&emph), &options())))
+    });
+    c.bench_function("canary_setext_256KiB", |b| {
+        b.iter(|| black_box(stitch(black_box(&setext), &options())))
+    });
+}
+
 /// Per-token incremental cost: stitch() each prefix of the doc as it grows,
 /// mirroring token-by-token streaming. This is the shape that runs on every
 /// input delta; driving its geomean down is the scope's primary score.
@@ -127,5 +210,5 @@ fn plain_full(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, incremental, full_doc, plain_full);
+criterion_group!(benches, incremental, full_doc, plain_full, canaries);
 criterion_main!(benches);
