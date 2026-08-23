@@ -155,40 +155,49 @@ fn has_no_enabled_markers(text: &str, options: &StitchOptions) -> bool {
     // only acts when one sits at the START of the last line (<4 indent cols).
     // A mid-prose hyphen is not a trigger, so memchr(`-`) would wrongly reject
     // lots of plain prose. Instead: if setext is off we're done (no trigger
-    // found above). If setext is on, run the precise line-start scan ONLY when
-    // a newline exists (no newline => handler returns Cow::Borrowed anyway).
+    // found above). If setext is on, a setext underline only follows a `\n`
+    // (or sits at the very start of the text). So drive the scan off newline
+    // positions via memchr — check only the first non-whitespace byte after
+    // each `\n` (and at offset 0). This turns the O(n) full scalar sweep into
+    // O(newlines): plain prose (~1 `\n` per ~200 bytes) does ~1/200th the work.
     if !setext {
         return true;
     }
-    if memchr::memchr(b'\n', text.as_bytes()).is_none() {
-        return true;
-    }
-
-    // Precise setext scan: a `-`/`=` at line start (optional <4 cols of
-    // leading whitespace, matching `setext_heading::handle`'s
-    // `leading_indent_cols < 4` + `trim()`) is a trigger. A mid-line hyphen
-    // (`plain-prose word`) is NOT, so hyphenated prose stays on the fast path.
     let bytes = text.as_bytes();
-    let mut at_line_start = true;
-    let mut line_indent_cols: usize = 0;
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        let hit = matches!(b, b'=' | b'-') && at_line_start && line_indent_cols < 4;
-        if hit {
-            return false;
+    // Line-start positions to check: offset 0 (the start-of-text line), then
+    // every byte right after each `\n`. memchr over newlines only — plain
+    // prose (~1 `\n` per ~200 bytes) does ~1/200th the work of a full sweep.
+    let mut starts = std::iter::once(0usize).chain(
+        memchr::memchr_iter(b'\n', bytes).map(|p| p + 1),
+    );
+    for start in starts.by_ref() {
+        if start >= bytes.len() {
+            continue;
         }
-        if b == b'\n' {
-            at_line_start = true;
-            line_indent_cols = 0;
-        } else if at_line_start {
-            match b {
-                b' ' => line_indent_cols += 1,
-                b'\t' => line_indent_cols += 8,
-                _ => at_line_start = false,
+        let mut cols: usize = 0;
+        let mut j = start;
+        while j < bytes.len() {
+            match bytes[j] {
+                b' ' => {
+                    cols += 1;
+                    if cols >= 4 {
+                        break;
+                    }
+                    j += 1;
+                }
+                // Tab advances to the next multiple-of-4 column, matching
+                // `setext_heading::leading_indent_cols` (NOT a flat +8).
+                b'\t' => {
+                    cols = (cols / 4 + 1) * 4;
+                    if cols >= 4 {
+                        break;
+                    }
+                    j += 1;
+                }
+                b'=' | b'-' => return false,
+                _ => break,
             }
         }
-        i += 1;
     }
     true
 }
