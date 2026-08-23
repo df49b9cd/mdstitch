@@ -98,11 +98,9 @@ fn incremental(c: &mut Criterion) {
     let mut group = c.benchmark_group("stitch_incremental");
     for &n in lens {
         let prefix = &doc[..n.min(doc.len())];
-        group.bench_with_input(
-            BenchmarkId::from_parameter(n),
-            prefix,
-            |b, input| b.iter(|| black_box(stitch(black_box(input), &options()))),
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(n), prefix, |b, input| {
+            b.iter(|| black_box(stitch(black_box(input), &options())))
+        });
     }
     group.finish();
 }

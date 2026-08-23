@@ -167,9 +167,8 @@ fn has_no_enabled_markers(text: &str, options: &StitchOptions) -> bool {
     // Line-start positions to check: offset 0 (the start-of-text line), then
     // every byte right after each `\n`. memchr over newlines only — plain
     // prose (~1 `\n` per ~200 bytes) does ~1/200th the work of a full sweep.
-    let mut starts = std::iter::once(0usize).chain(
-        memchr::memchr_iter(b'\n', bytes).map(|p| p + 1),
-    );
+    let mut starts =
+        std::iter::once(0usize).chain(memchr::memchr_iter(b'\n', bytes).map(|p| p + 1));
     for start in starts.by_ref() {
         if start >= bytes.len() {
             continue;
