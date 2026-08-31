@@ -85,27 +85,53 @@ impl HandlerEntry<'_> {
     }
 }
 
-/// Returns `true` when the text contains none of the trigger bytes any enabled
-/// builtin handler could act on, so [`stitch`] can skip `CodeBlockRanges::new`
-/// and the whole builtin pipeline and return the input unchanged
-/// (`Cow::Borrowed`).
+/// Which builtin trigger families are present in the text — the per-group
+/// projection of the x1 marker-absence scan (x3). When all bits are false,
+/// `stitch` skips `CodeBlockRanges::new` and the whole builtin pipeline,
+/// returning the input unchanged (`Cow::Borrowed`).
 ///
 /// Option-aware: a disabled handler's trigger bytes never block the fast path.
 /// Custom handlers (`!options.handlers.is_empty()`) have unknown triggers, so
-/// the caller must NOT take the fast path when any are registered.
+/// the caller must not take the fast path when any are registered.
 ///
 /// Trigger set (per enabled builtin, conservatively inclusive to preserve
 /// parity — `]` is a trigger because the link handler rewrites the
 /// `](stitch:incomplete-link)` sentinel it inserts, and `\` because handlers
 /// consult `is_escaped`):
-/// - emphasis / italic / bold / strikethrough / single_tilde / inline_code:
-///   `*` `_` `` ` `` `~`
-/// - katex / inline_katex / comparison_operators: `$`
-/// - html_tags / comparison_operators: `>` `<`
-/// - links / images: `[` `]` `!` `(`
-/// - setext_headings: `=`
-/// - escapes (consulted by `should_skip_*`): `\`
-fn has_no_enabled_markers(text: &str, options: &StitchOptions) -> bool {
+///   - emphasis / italic / bold / strikethrough / single_tilde / inline_code:
+///     `*` `_` `` ` `` `~`
+///   - katex / inline_katex / comparison_operators: `$`
+///   - html_tags / comparison_operators: `>` `<`
+///   - links / images: `[` `]` `!` `(`
+///   - setext_headings: `=`
+///   - escapes (consulted by `should_skip_*`): `\`
+///
+/// Same scans, same early exits,
+/// but the per-group bits are RETURNED instead of `||`-folded, so the builtin
+/// pipeline can skip handlers whose trigger byte cannot occur (a code-only
+/// reply then skips the html/link/math/setext passes without a single extra
+/// byte scan). `false` means "provably absent" — never a false negative.
+#[derive(Clone, Copy, Default)]
+struct TriggerPresence {
+    /// `*` `_` `` ` `` `~` `\` — emphasis / strikethrough / inline code.
+    emphasis: bool,
+    /// `$` — katex / inline katex / comparison `$`.
+    math: bool,
+    /// `>` `<` — html tags / comparison operators.
+    html: bool,
+    /// `[` `]` `!` `(` — links / images.
+    link: bool,
+    /// setext `-`/`=` underline at a line start with <4 indent cols.
+    setext: bool,
+}
+
+impl TriggerPresence {
+    fn none(&self) -> bool {
+        !(self.emphasis || self.math || self.html || self.link || self.setext)
+    }
+}
+
+fn scan_triggers(text: &str, options: &StitchOptions) -> TriggerPresence {
     let emphasis_like = options.bold
         || options.italic
         || options.bold_italic
@@ -115,91 +141,78 @@ fn has_no_enabled_markers(text: &str, options: &StitchOptions) -> bool {
     let math_like = options.katex || options.inline_katex || options.comparison_operators;
     let html_like = options.html_tags || options.comparison_operators;
     let link_like = options.links || options.images;
-    let setext = options.setext_headings;
 
-    // If no builtin handler is enabled at all, nothing can change the text.
-    if !(emphasis_like || math_like || html_like || link_like || setext) {
-        return true;
-    }
+    let mut p = TriggerPresence::default();
 
-    // Fast SIMD rejection: for each enabled option group, search the text for
-    // any of its (unconstrained) trigger bytes with memchr/memchr2/memchr3 —
-    // ~15-30x faster per byte than the scalar loop, so plain prose (no triggers)
-    // costs nearly nothing here instead of scanning the whole text by hand.
-    // These are EXACT parity-equivalents of the scalar match arms below them —
-    // a hit means the slow path always would have triggered too.
-    if emphasis_like {
-        // emphasis group triggers: `*`, `_`, `` ` ``, `~`, `\` (escaped consults).
-        if memchr::memchr3(b'*', b'_', b'`', text.as_bytes()).is_some()
-            || memchr::memchr2(b'~', b'\\', text.as_bytes()).is_some()
-        {
-            return false;
-        }
+    // Per-group early-exit memchr passes (x2's SIMD scans, kept): on
+    // marker-heavy text each scan exits within the first ~20 bytes, so the
+    // total cost is no worse than the old short-circuit loop; on absent-group
+    // text the full-width SIMD scan is ~26us/256KiB — far below one handler's
+    // O(n) pass it lets us skip.
+    if emphasis_like
+        && (memchr::memchr3(b'*', b'_', b'`', text.as_bytes()).is_some()
+            || memchr::memchr2(b'~', b'\\', text.as_bytes()).is_some())
+    {
+        p.emphasis = true;
     }
     if math_like && memchr::memchr(b'$', text.as_bytes()).is_some() {
-        return false;
+        p.math = true;
     }
     if html_like && memchr::memchr2(b'>', b'<', text.as_bytes()).is_some() {
-        return false;
+        p.html = true;
     }
-    if link_like {
-        // links/images triggers: `[`, `]`, `!`, `(`.
-        if memchr::memchr3(b'[', b']', b'!', text.as_bytes()).is_some()
-            || memchr::memchr(b'(', text.as_bytes()).is_some()
-        {
-            return false;
-        }
+    if link_like
+        && (memchr::memchr3(b'[', b']', b'!', text.as_bytes()).is_some()
+            || memchr::memchr(b'(', text.as_bytes()).is_some())
+    {
+        p.link = true;
     }
 
     // Setext underlines (`-`/`=`) are NOT plain byte triggers — the handler
-    // only acts when one sits at the START of the last line (<4 indent cols).
-    // A mid-prose hyphen is not a trigger, so memchr(`-`) would wrongly reject
-    // lots of plain prose. Instead: if setext is off we're done (no trigger
-    // found above). If setext is on, a setext underline only follows a `\n`
-    // (or sits at the very start of the text). So drive the scan off newline
-    // positions via memchr — check only the first non-whitespace byte after
-    // each `\n` (and at offset 0). This turns the O(n) full scalar sweep into
-    // O(newlines): plain prose (~1 `\n` per ~200 bytes) does ~1/200th the work.
-    if !setext {
-        return true;
-    }
-    let bytes = text.as_bytes();
-    // Line-start positions to check: offset 0 (the start-of-text line), then
-    // every byte right after each `\n`. memchr over newlines only — plain
-    // prose (~1 `\n` per ~200 bytes) does ~1/200th the work of a full sweep.
-    let mut starts =
-        std::iter::once(0usize).chain(memchr::memchr_iter(b'\n', bytes).map(|p| p + 1));
-    for start in starts.by_ref() {
-        if start >= bytes.len() {
-            continue;
-        }
-        let mut cols: usize = 0;
-        let mut j = start;
-        while j < bytes.len() {
-            match bytes[j] {
-                b' ' => {
-                    cols += 1;
-                    if cols >= 4 {
+    // only acts when one sits at the START of a line (<4 indent cols). Drive
+    // the scan off newline positions via memchr — O(newlines), not O(bytes).
+    if options.setext_headings {
+        let bytes = text.as_bytes();
+        let starts = std::iter::once(0usize).chain(memchr::memchr_iter(b'\n', bytes).map(|q| q + 1));
+        for start in starts {
+            if start >= bytes.len() {
+                continue;
+            }
+            let mut cols: usize = 0;
+            let mut j = start;
+            while j < bytes.len() {
+                match bytes[j] {
+                    b' ' => {
+                        cols += 1;
+                        if cols >= 4 {
+                            break;
+                        }
+                        j += 1;
+                    }
+                    // Tab advances to the next multiple-of-4 column, matching
+                    // `setext_heading::leading_indent_cols` (NOT a flat +8).
+                    b'\t' => {
+                        cols = (cols / 4 + 1) * 4;
+                        if cols >= 4 {
+                            break;
+                        }
+                        j += 1;
+                    }
+                    b'=' | b'-' => {
+                        p.setext = true;
                         break;
                     }
-                    j += 1;
+                    _ => break,
                 }
-                // Tab advances to the next multiple-of-4 column, matching
-                // `setext_heading::leading_indent_cols` (NOT a flat +8).
-                b'\t' => {
-                    cols = (cols / 4 + 1) * 4;
-                    if cols >= 4 {
-                        break;
-                    }
-                    j += 1;
-                }
-                b'=' | b'-' => return false,
-                _ => break,
+            }
+            if p.setext {
+                break;
             }
         }
     }
-    true
+    p
 }
+
 
 /// Preprocesses streaming markdown text, auto-completing any incomplete syntax.
 ///
@@ -221,13 +234,22 @@ pub fn stitch<'a>(text: &'a str, options: &StitchOptions) -> Cow<'a, str> {
     // to track — skip the O(n) `CodeBlockRanges::new` (6 full-text scans) and
     // every handler pass, returning the input unchanged. Custom handlers have
     // unknown triggers, so this only fires on the builtin pipeline.
-    if options.handlers.is_empty() && has_no_enabled_markers(result.as_ref(), options) {
-        return result;
+    //
+    // x3: the scan's per-group bits are NOT discarded — they gate the builtin
+    // pipeline per handler below (a code-only reply skips the html/link/math
+    // passes outright). The scan is identical either way (per-group early-exit
+    // memchr), so this is free information given to the pipeline.
+    let mut presence = TriggerPresence::default();
+    if options.handlers.is_empty() {
+        presence = scan_triggers(result.as_ref(), options);
+        if presence.none() {
+            return result;
+        }
     }
 
     // If no custom handlers, use the fast fixed-order pipeline.
     if options.handlers.is_empty() {
-        return run_builtin_pipeline(result, options);
+        return run_builtin_pipeline(result, options, presence);
     }
 
     // Build and sort handler entries by priority.
@@ -425,8 +447,17 @@ pub fn stitch<'a>(text: &'a str, options: &StitchOptions) -> Cow<'a, str> {
 }
 
 /// Fast path: fixed-order pipeline with no dynamic dispatch (used when no custom handlers).
-fn run_builtin_pipeline<'a>(mut result: Cow<'a, str>, options: &StitchOptions) -> Cow<'a, str> {
-    if options.comparison_operators {
+fn run_builtin_pipeline<'a>(
+    mut result: Cow<'a, str>,
+    options: &StitchOptions,
+    presence: TriggerPresence,
+) -> Cow<'a, str> {
+    // Per-group presence gates (x3): a handler whose trigger byte is provably
+    // absent cannot rewrite anything, so its O(n) pass is skipped. Pipeline
+    // ORDER and per-handler semantics are unchanged; only no-op passes drop
+    // out. Safety of the links->html re-run: the only way `link_image`
+    // exposes html (`[<a](` unwrapping) requires `<` present already.
+    if options.comparison_operators && presence.html {
         result = apply(result, comparison_operators::handle);
     }
 
@@ -436,26 +467,24 @@ fn run_builtin_pipeline<'a>(mut result: Cow<'a, str>, options: &StitchOptions) -
     // Must be `mut` because `link_image` in `LinkMode::TextOnly` can remove a `[`
     // byte from the middle of the string, shifting every subsequent byte offset.
     // Stale ranges would then mis-report code regions to downstream handlers.
-    let needs_ranges = options.html_tags
-        || options.links
-        || options.images
-        || options.bold_italic
-        || options.bold
-        || options.italic
-        || options.strikethrough
-        || options.katex
-        || options.inline_katex;
+    let needs_ranges = (options.html_tags && presence.html)
+        || (options.links || options.images) && presence.link
+        || (options.bold_italic || options.bold || options.italic || options.strikethrough)
+            && presence.emphasis
+        || (options.katex || options.inline_katex) && presence.math;
     let mut ranges = needs_ranges.then(|| ranges::CodeBlockRanges::new(&result));
 
     if options.html_tags
+        && presence.html
         && let Some(ref r) = ranges
     {
         result = apply_with(result, |text| html_tags::handle_with_ranges(text, r));
     }
-    if options.setext_headings {
+    if options.setext_headings && presence.setext {
         result = apply(result, setext_heading::handle);
     }
     if (options.links || options.images)
+        && presence.link
         && let Some(ref r_guard) = ranges
     {
         let link_mode = options.link_mode;
@@ -486,16 +515,21 @@ fn run_builtin_pipeline<'a>(mut result: Cow<'a, str>, options: &StitchOptions) -
     // single_tilde runs AFTER links/images: TextOnly link unwrapping can
     // delete a `[` and expose a lone `~` that must still be escaped for the
     // pipeline to be idempotent (proptest regression: `"a~[A"`).
-    if options.single_tilde {
+    // Gating on the ENTRY text's presence: the `~` the comment worries about
+    // sat in the entry text already (unwrapping removes `[`, never adds `~`),
+    // so presence.emphasis covers it.
+    if options.single_tilde && presence.emphasis {
         result = apply(result, single_tilde::handle);
     }
     // inline_code runs BEFORE emphasis: closing an open backtick first lets
     // the emphasis handlers see a real code span and skip its contents,
     // keeping the pipeline idempotent (proptest regression: `"*A***`a"`).
-    if options.inline_code {
+    if options.inline_code && presence.emphasis {
         result = apply(result, inline_code::handle);
     }
-    if let Some(ref r) = ranges {
+    if presence.emphasis
+        && let Some(ref r) = ranges
+    {
         if options.bold_italic {
             result = apply_with(result, |text| {
                 emphasis::handle_bold_italic_with_ranges(text, r)
@@ -518,6 +552,10 @@ fn run_builtin_pipeline<'a>(mut result: Cow<'a, str>, options: &StitchOptions) -
         if options.strikethrough {
             result = apply_with(result, |text| strikethrough::handle_with_ranges(text, r));
         }
+    }
+    if presence.math
+        && let Some(ref r) = ranges
+    {
         if options.katex {
             result = apply_with(result, |text| katex::handle_block_with_ranges(text, r));
         }

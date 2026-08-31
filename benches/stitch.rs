@@ -83,6 +83,25 @@ fn plain_doc(target_bytes: usize) -> String {
     doc
 }
 
+/// Build a ~N-byte code-only document: fenced blocks + plain prose, the
+/// realistic shape of a "code answer" assistant reply. Only the emphasis
+/// group's backtick trigger is present — html/link/math/setext triggers are
+/// absent, so the per-handler presence gating (x3) shows up here. The
+/// marker-heavy corpus would hide it (every group hits); the plain corpus
+/// hides it the other way (whole-pipeline early-out).
+fn codeonly_doc(target_bytes: usize) -> String {
+    let mut doc = String::with_capacity(target_bytes + 4096);
+    let mut n = 0usize;
+    while doc.len() < target_bytes {
+        doc.push_str(&format!(
+            "```rust\nfn f{n}() -> u64 {{\n    let mut acc = 0u64;\n    for i in 0..{n} {{ acc += i as u64; }}\n    acc\n}}\n```\n\nThe function f{n} computes the triangular number. It iterates and accumulates; boundary conditions are noted in the paragraph that follows so streaming prose keeps flowing between code fences.\n\n"
+        ));
+        n += 1;
+    }
+    doc.push_str("Streaming tail in prog");
+    doc
+}
+
 fn options() -> StitchOptions {
     StitchOptions::default()
 }
@@ -210,5 +229,20 @@ fn plain_full(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, incremental, full_doc, plain_full, canaries);
+/// Code-only corpus (fences + plain prose): only the emphasis group triggers.
+/// x3's per-handler gating skips the html/link/math/setext passes here; the
+/// other corpora cannot show that win (all-markers hits every group, plain
+/// takes the whole-pipeline early-out).
+fn codeonly(c: &mut Criterion) {
+    let doc = codeonly_doc(256 * 1024);
+    c.bench_function("stitch_codeonly_full_256KiB", |b| {
+        b.iter(|| black_box(stitch(black_box(&doc), &options())))
+    });
+    let prefix = &doc[..16_384.min(doc.len())];
+    c.bench_function("stitch_codeonly_incremental_16384", |b| {
+        b.iter(|| black_box(stitch(black_box(prefix), &options())))
+    });
+}
+
+criterion_group!(benches, incremental, full_doc, plain_full, codeonly, canaries);
 criterion_main!(benches);
