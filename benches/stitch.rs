@@ -244,5 +244,12 @@ fn codeonly(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, incremental, full_doc, plain_full, codeonly, canaries);
+criterion_group!(
+    benches,
+    incremental,
+    full_doc,
+    plain_full,
+    codeonly,
+    canaries
+);
 criterion_main!(benches);

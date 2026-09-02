@@ -173,7 +173,8 @@ fn scan_triggers(text: &str, options: &StitchOptions) -> TriggerPresence {
     // the scan off newline positions via memchr — O(newlines), not O(bytes).
     if options.setext_headings {
         let bytes = text.as_bytes();
-        let starts = std::iter::once(0usize).chain(memchr::memchr_iter(b'\n', bytes).map(|q| q + 1));
+        let starts =
+            std::iter::once(0usize).chain(memchr::memchr_iter(b'\n', bytes).map(|q| q + 1));
         for start in starts {
             if start >= bytes.len() {
                 continue;
@@ -212,7 +213,6 @@ fn scan_triggers(text: &str, options: &StitchOptions) -> TriggerPresence {
     }
     p
 }
-
 
 /// Preprocesses streaming markdown text, auto-completing any incomplete syntax.
 ///
