@@ -72,16 +72,35 @@ fn count_single_asterisks(text: &str) -> usize {
 
 /// Counts single asterisks that are not part of `**`/`***`, not escaped,
 /// not list markers, not word-internal, and not inside fenced code blocks.
-pub(crate) fn count_single_asterisks_with_ranges(text: &str, _ranges: &CodeBlockRanges) -> usize {
+pub(crate) fn count_single_asterisks_with_ranges(text: &str, ranges: &CodeBlockRanges) -> usize {
+    count_single_markers_with_ranges(text, ranges, b'*')
+}
+
+/// Test-only convenience wrapper that builds `CodeBlockRanges` on the fly.
+#[cfg(test)]
+fn count_single_underscores(text: &str) -> usize {
+    count_single_underscores_with_ranges(text, &CodeBlockRanges::new(text))
+}
+
+pub(crate) fn count_single_underscores_with_ranges(text: &str, ranges: &CodeBlockRanges) -> usize {
+    count_single_markers_with_ranges(text, ranges, b'_')
+}
+
+fn count_single_markers_with_ranges(text: &str, ranges: &CodeBlockRanges, marker: u8) -> usize {
     let bytes = text.as_bytes();
     let len = bytes.len();
     let mut count = 0;
 
     for_each_byte_outside_fence(bytes, |byte, i, _| {
-        if byte == b'*' {
+        if byte == marker {
             let prev = if i > 0 { bytes[i - 1] } else { 0 };
             let next = if i + 1 < len { bytes[i + 1] } else { 0 };
-            if !should_skip_asterisk(text, i, prev, next) {
+            let skip = if marker == b'*' {
+                should_skip_asterisk(text, i, prev, next)
+            } else {
+                should_skip_underscore(text, i, prev, next, ranges)
+            };
+            if !skip {
                 count += 1;
             }
         }
@@ -127,29 +146,6 @@ fn should_skip_underscore(
         }
     }
     false
-}
-
-/// Test-only convenience wrapper that builds `CodeBlockRanges` on the fly.
-#[cfg(test)]
-fn count_single_underscores(text: &str) -> usize {
-    count_single_underscores_with_ranges(text, &CodeBlockRanges::new(text))
-}
-
-pub(crate) fn count_single_underscores_with_ranges(text: &str, ranges: &CodeBlockRanges) -> usize {
-    let bytes = text.as_bytes();
-    let len = bytes.len();
-    let mut count = 0;
-
-    for_each_byte_outside_fence(bytes, |byte, i, _| {
-        if byte == b'_' {
-            let prev = if i > 0 { bytes[i - 1] } else { 0 };
-            let next = if i + 1 < len { bytes[i + 1] } else { 0 };
-            if !should_skip_underscore(text, i, prev, next, ranges) {
-                count += 1;
-            }
-        }
-    });
-    count
 }
 
 // ---------------------------------------------------------------------------
@@ -385,75 +381,7 @@ fn find_first_single_asterisk_index_with_ranges(
     text: &str,
     ranges: &CodeBlockRanges,
 ) -> Option<usize> {
-    let bytes = text.as_bytes();
-    let len = bytes.len();
-    let has_dollar = text.contains('$');
-    let mut scanner = FenceScanner::new();
-    let mut i = 0;
-    let mut line_start = 0usize;
-
-    while i < len {
-        if i == line_start
-            && let Some(next) = scanner.consume_fence_at_line_start(bytes, line_start)
-        {
-            i = next;
-            continue;
-        }
-        if scanner.in_code_block() {
-            if bytes[i] == b'\n' {
-                line_start = i + 1;
-            }
-            i += 1;
-            continue;
-        }
-
-        if bytes[i] == b'*' {
-            let prev = if i > 0 { bytes[i - 1] } else { 0 };
-            let next = if i + 1 < len { bytes[i + 1] } else { 0 };
-
-            // Must be a single * (not part of ** or ***).
-            if prev == b'*' || next == b'*' {
-                i += 1;
-                continue;
-            }
-            if prev == b'\\' {
-                i += 1;
-                continue;
-            }
-            if has_dollar && ranges.is_within_complete_math(i) {
-                i += 1;
-                continue;
-            }
-
-            // Asymmetric: SOF is ws, EOF is not — see should_skip_asterisk.
-            let prev_ws = prev == 0 || matches!(prev, b' ' | b'\t' | b'\n' | b'\r');
-            let next_ws = matches!(next, b' ' | b'\t' | b'\n' | b'\r');
-            if prev_ws && next_ws {
-                i += 1;
-                continue;
-            }
-
-            // Skip if word-internal (Unicode-aware).
-            if i > 0 && i + 1 < text.len() {
-                let pc = text[..i].chars().next_back();
-                let nc = text[i + 1..].chars().next();
-                if let (Some(pc), Some(nc)) = (pc, nc)
-                    && is_word_char(pc)
-                    && is_word_char(nc)
-                {
-                    i += 1;
-                    continue;
-                }
-            }
-
-            return Some(i);
-        }
-        if bytes[i] == b'\n' {
-            line_start = i + 1;
-        }
-        i += 1;
-    }
-    None
+    find_first_single_marker_index_with_ranges(text, ranges, b'*')
 }
 
 /// Test-only convenience wrapper that builds `CodeBlockRanges` on the fly.
@@ -465,6 +393,14 @@ fn find_first_single_underscore_index(text: &str) -> Option<usize> {
 fn find_first_single_underscore_index_with_ranges(
     text: &str,
     ranges: &CodeBlockRanges,
+) -> Option<usize> {
+    find_first_single_marker_index_with_ranges(text, ranges, b'_')
+}
+
+fn find_first_single_marker_index_with_ranges(
+    text: &str,
+    ranges: &CodeBlockRanges,
+    marker: u8,
 ) -> Option<usize> {
     let bytes = text.as_bytes();
     let len = bytes.len();
@@ -488,11 +424,12 @@ fn find_first_single_underscore_index_with_ranges(
             continue;
         }
 
-        if bytes[i] == b'_' {
+        if bytes[i] == marker {
             let prev = if i > 0 { bytes[i - 1] } else { 0 };
             let next = if i + 1 < len { bytes[i + 1] } else { 0 };
 
-            if prev == b'_' || next == b'_' {
+            // Must be a single marker (not part of a double or triple run).
+            if prev == marker || next == marker {
                 i += 1;
                 continue;
             }
@@ -504,10 +441,23 @@ fn find_first_single_underscore_index_with_ranges(
                 i += 1;
                 continue;
             }
-            if ranges.is_within_link_url(i) {
+
+            // Asterisk-only: flanking whitespace check; underscore-only:
+            // link URLs are not emphasis (see should_skip_underscore).
+            if marker != b'*' && ranges.is_within_link_url(i) {
                 i += 1;
                 continue;
             }
+            if marker == b'*' {
+                // Asymmetric: SOF is ws, EOF is not — see should_skip_asterisk.
+                let prev_ws = prev == 0 || matches!(prev, b' ' | b'\t' | b'\n' | b'\r');
+                let next_ws = matches!(next, b' ' | b'\t' | b'\n' | b'\r');
+                if prev_ws && next_ws {
+                    i += 1;
+                    continue;
+                }
+            }
+
             // Skip if word-internal (Unicode-aware).
             if i > 0 && i + 1 < text.len() {
                 let pc = text[..i].chars().next_back();

@@ -183,12 +183,30 @@ impl CodeBlockRanges {
     /// - Closing `$` (or `$$`) at `k`: position `k` IS still inside math
     ///   (the toggle fires only when the scan processes `k`), but `k + 1`
     ///   is outside — so the range ends at `k + 1`.
-    /// - Unterminated math at end of text: range extends to `len`.
+    /// - Unterminated math at end of text: range extends to `len + 1`, only
+    ///   when `include_unterminated` is set (`compute_complete_math_ranges`
+    ///   omits it so a lone `$` doesn't swallow emphasis closers across
+    ///   passes).
     ///
     /// For `$$xy$$` that yields `[1, 5)` (positions 1..4 inside); for `$x$`
     /// it yields `[1, 3)` (positions 1..2 inside). Cross-validated against
     /// the original function in `tests::matches_original_is_within_math_block`.
     fn compute_math_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
+        Self::compute_math_ranges_impl(text, true)
+    }
+
+    /// Like `compute_math_ranges` but only emits ranges for math spans that
+    /// actually close. Unterminated math at EOF produces no range — emphasis
+    /// counters rely on this so a lone dollar sign doesn't swallow their
+    /// trailing completion markers across passes.
+    fn compute_complete_math_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
+        Self::compute_math_ranges_impl(text, false)
+    }
+
+    fn compute_math_ranges_impl(
+        text: &str,
+        include_unterminated: bool,
+    ) -> Vec<std::ops::Range<usize>> {
         let bytes = text.as_bytes();
         let len = bytes.len();
         let mut ranges = Vec::new();
@@ -236,55 +254,8 @@ impl CodeBlockRanges {
         // See matches_original_is_within_math_block (uses 0..=len); using len+1
         // keeps agreement at pos == len for unterminated math, matching the
         // code/inline-code trailing-range convention.
-        if (in_block_math || in_inline_math) && math_start <= len {
+        if include_unterminated && (in_block_math || in_inline_math) && math_start <= len {
             ranges.push(math_start..len + 1);
-        }
-
-        ranges
-    }
-
-    /// Like `compute_math_ranges` but only emits ranges for math spans that
-    /// actually close. Unterminated math at EOF produces no range — emphasis
-    /// counters rely on this so a lone dollar sign doesn't swallow their
-    /// trailing completion markers across passes. Boundary rules otherwise
-    /// match `compute_math_ranges` (see its doc comment for worked examples).
-    fn compute_complete_math_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
-        let bytes = text.as_bytes();
-        let len = bytes.len();
-        let mut ranges = Vec::new();
-        let mut in_inline_math = false;
-        let mut in_block_math = false;
-        let mut math_start: usize = 0;
-        let mut i = 0;
-
-        while i < len {
-            if bytes[i] == b'\\' && i + 1 < len && bytes[i + 1] == b'$' {
-                i += 2;
-                continue;
-            }
-            if bytes[i] == b'$' {
-                if i + 1 < len && bytes[i + 1] == b'$' {
-                    if in_block_math {
-                        ranges.push(math_start..i + 1);
-                        in_block_math = false;
-                    } else {
-                        in_block_math = true;
-                        math_start = i + 1;
-                    }
-                    i += 2;
-                    in_inline_math = false;
-                    continue;
-                } else if !in_block_math {
-                    if in_inline_math {
-                        ranges.push(math_start..i + 1);
-                        in_inline_math = false;
-                    } else {
-                        in_inline_math = true;
-                        math_start = i + 1;
-                    }
-                }
-            }
-            i += 1;
         }
 
         ranges
