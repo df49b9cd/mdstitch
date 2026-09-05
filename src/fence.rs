@@ -87,6 +87,18 @@ impl FenceScanner {
         self.in_code_block
     }
 
+    /// The opening fence's character ('`' or '~') while inside a block.
+    #[inline]
+    pub fn opening_char(&self) -> char {
+        self.opening_fence_char as char
+    }
+
+    /// The opening fence's run length (3+) while inside a block.
+    #[inline]
+    pub fn opening_len(&self) -> usize {
+        self.opening_fence_len
+    }
+
     /// If `line_start` begins a CommonMark fence line (≤3 leading spaces then
     /// 3+ backticks or tildes), update the fence state and return
     /// `Some(run_end)` — the position just past the fence run. Returns `None`

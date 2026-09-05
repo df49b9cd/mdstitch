@@ -24,6 +24,25 @@ pub fn has_incomplete_code_fence(markdown: &str) -> bool {
     scanner.in_code_block()
 }
 
+/// The opening fence's run when the text ends inside one (char + length),
+/// so repair code can append a matching closer (`` ```` `` is not closed
+/// by ``` ``` ``). Returns `None` when no fence is open.
+pub fn open_fence(markdown: &str) -> Option<(char, usize)> {
+    let mut scanner = FenceScanner::new();
+    let bytes = markdown.as_bytes();
+    let mut line_start = 0usize;
+    for i in 0..=bytes.len() {
+        if i == bytes.len() || bytes[i] == b'\n' {
+            scanner.consume_fence_at_line_start(bytes, line_start);
+            line_start = i + 1;
+        }
+    }
+    if !scanner.in_code_block() {
+        return None;
+    }
+    Some((scanner.opening_char(), scanner.opening_len().max(3)))
+}
+
 /// Returns `true` if the markdown text contains a table delimiter row.
 pub fn has_table(markdown: &str) -> bool {
     // Pattern: optional |, then one or more columns of :?-+:? separated by |

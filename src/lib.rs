@@ -33,7 +33,7 @@ pub use ranges::CodeBlockRanges;
 
 // Re-export public items from internal modules.
 pub use detect_direction::{TextDirection, detect_text_direction};
-pub use incomplete_code::{has_incomplete_code_fence, has_table};
+pub use incomplete_code::{has_incomplete_code_fence, has_table, open_fence};
 pub use preprocess::{
     normalize_html_indentation, preprocess_custom_tags, preprocess_literal_tag_content,
 };
