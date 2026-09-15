@@ -23,3 +23,22 @@ jobs:
 
       - name: Publish to crates.io
         run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        continue-on-error: true
+        id: publish
+
+      # Re-tagging an already-published version is a no-op (that version has
+      # already been released from this branch); only surface a failure when
+      # the version on the tag has never been published at all.
+      - name: Verify version is now on crates.io
+        if: steps.publish.outcome != 'success'
+        run: |
+          version=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+          status=$(curl -s -o /dev/null -w "%{http_code}" -H "User-Agent: mdstitch-release (github.com/df49b9cd/mdstitch)" "https://crates.io/api/v1/crates/mdstitch/$version")
+          if [ "$status" = "200" ]; then
+            echo "mdstitch $version already published; nothing to do."
+          else
+            echo "mdstitch $version missing from crates.io (http $status)."
+            exit 1
+          fi
