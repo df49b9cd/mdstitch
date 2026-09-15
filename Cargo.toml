@@ -1,8 +1,8 @@
 [package]
 edition = "2024"
-rust-version = "1.98.1"
+rust-version = "1.95.0"
 name = "mdstitch"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Soeren Magnus Olesen"]
 exclude = ["proptest-regressions/**"]
 description = "Streaming markdown preprocessor that closes unterminated syntax token-by-token."
