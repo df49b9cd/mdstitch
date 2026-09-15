@@ -48,42 +48,7 @@ pub use utils::{
 
 use std::borrow::Cow;
 
-const INCOMPLETE_LINK_MARKER: &str = "](stitch:incomplete-link)";
-
-/// A built-in handler, either plain or taking pre-computed code-block ranges.
-enum BuiltInHandler<'a> {
-    /// Handler that does not need code-block ranges.
-    Plain(Box<dyn Fn(&str) -> Cow<'_, str> + 'a>),
-    /// Handler that takes pre-computed `CodeBlockRanges` to avoid redundant O(n) scans.
-    ///
-    /// The returned `Cow` borrows from the input `&str` (first parameter), not
-    /// from the ranges — spelled out via HRTB because two `&` parameters defeat
-    /// lifetime elision.
-    WithRanges(Box<dyn for<'b> Fn(&'b str, &ranges::CodeBlockRanges) -> Cow<'b, str> + 'a>),
-}
-
-/// A handler entry in the priority-sorted pipeline.
-enum HandlerEntry<'a> {
-    BuiltIn {
-        handler: BuiltInHandler<'a>,
-        priority: i32,
-        early_return: bool,
-        /// `true` if the handler may rewrite bytes in the middle of the string,
-        /// invalidating any pre-computed `CodeBlockRanges`.
-        mutates_mid_text: bool,
-    },
-    /// A custom handler (trait object).
-    Custom(&'a dyn StitchHandler),
-}
-
-impl HandlerEntry<'_> {
-    fn priority(&self) -> i32 {
-        match self {
-            HandlerEntry::BuiltIn { priority, .. } => *priority,
-            HandlerEntry::Custom(h) => h.priority(),
-        }
-    }
-}
+pub(crate) const INCOMPLETE_LINK_MARKER: &str = "](stitch:incomplete-link)";
 
 /// Which builtin trigger families are present in the text — the per-group
 /// projection of the x1 marker-absence scan (x3). When all bits are false,
@@ -179,34 +144,14 @@ fn scan_triggers(text: &str, options: &StitchOptions) -> TriggerPresence {
             if start >= bytes.len() {
                 continue;
             }
-            let mut cols: usize = 0;
-            let mut j = start;
-            while j < bytes.len() {
-                match bytes[j] {
-                    b' ' => {
-                        cols += 1;
-                        if cols >= 4 {
-                            break;
-                        }
-                        j += 1;
-                    }
-                    // Tab advances to the next multiple-of-4 column, matching
-                    // `setext_heading::leading_indent_cols` (NOT a flat +8).
-                    b'\t' => {
-                        cols = (cols / 4 + 1) * 4;
-                        if cols >= 4 {
-                            break;
-                        }
-                        j += 1;
-                    }
-                    b'=' | b'-' => {
-                        p.setext = true;
-                        break;
-                    }
-                    _ => break,
-                }
-            }
-            if p.setext {
+            let line = &text[start..];
+            if utils::leading_indent_cols(line) < utils::CODE_INDENT_COLS
+                && matches!(
+                    line.trim_start_matches([' ', '\t']).as_bytes(),
+                    [b'=' | b'-', ..]
+                )
+            {
+                p.setext = true;
                 break;
             }
         }
@@ -223,7 +168,7 @@ pub fn stitch<'a>(text: &'a str, options: &StitchOptions) -> Cow<'a, str> {
     }
 
     // Strip trailing single space (preserve double space for line breaks).
-    let mut result: Cow<'a, str> = if text.ends_with(' ') && !text.ends_with("  ") {
+    let result: Cow<'a, str> = if text.ends_with(' ') && !text.ends_with("  ") {
         Cow::Borrowed(&text[..text.len() - 1])
     } else {
         Cow::Borrowed(text)
@@ -233,338 +178,353 @@ pub fn stitch<'a>(text: &'a str, options: &StitchOptions) -> Cow<'a, str> {
     // byte in the text, there is nothing to complete and no code/math/region
     // to track — skip the O(n) `CodeBlockRanges::new` (6 full-text scans) and
     // every handler pass, returning the input unchanged. Custom handlers have
-    // unknown triggers, so this only fires on the builtin pipeline.
-    //
-    // x3: the scan's per-group bits are NOT discarded — they gate the builtin
-    // pipeline per handler below (a code-only reply skips the html/link/math
-    // passes outright). The scan is identical either way (per-group early-exit
-    // memchr), so this is free information given to the pipeline.
-    let mut presence = TriggerPresence::default();
-    if options.handlers.is_empty() {
-        presence = scan_triggers(result.as_ref(), options);
-        if presence.none() {
+    // unknown triggers, so this only fires on the builtin-only pipeline.
+    let presence = if options.handlers.is_empty() {
+        let p = scan_triggers(result.as_ref(), options);
+        if p.none() {
             return result;
         }
-    }
+        p
+    } else {
+        // Custom handlers may introduce any trigger byte — keep every gate open.
+        TriggerPresence::default()
+    };
 
-    // If no custom handlers, use the fast fixed-order pipeline.
-    if options.handlers.is_empty() {
-        return run_builtin_pipeline(result, options, presence);
-    }
-
-    // Build and sort handler entries by priority.
-    let mut entries: Vec<HandlerEntry<'_>> = Vec::new();
-
-    if options.single_tilde {
-        entries.push(HandlerEntry::BuiltIn {
-            handler: BuiltInHandler::Plain(Box::new(single_tilde::handle)),
-            priority: priority::SINGLE_TILDE,
-            early_return: false,
-            mutates_mid_text: false,
-        });
-    }
-    if options.comparison_operators {
-        entries.push(HandlerEntry::BuiltIn {
-            handler: BuiltInHandler::Plain(Box::new(comparison_operators::handle)),
-            priority: priority::COMPARISON_OPERATORS,
-            early_return: false,
-            mutates_mid_text: false,
-        });
-    }
-    if options.html_tags {
-        entries.push(HandlerEntry::BuiltIn {
-            handler: BuiltInHandler::WithRanges(Box::new(html_tags::handle_with_ranges)),
-            priority: priority::HTML_TAGS,
-            early_return: false,
-            mutates_mid_text: false,
-        });
-    }
-    if options.setext_headings {
-        entries.push(HandlerEntry::BuiltIn {
-            handler: BuiltInHandler::Plain(Box::new(setext_heading::handle)),
-            priority: priority::SETEXT_HEADINGS,
-            early_return: false,
-            mutates_mid_text: false,
-        });
-    }
-    if options.links || options.images {
-        let link_mode = options.link_mode;
-        let links_enabled = options.links;
-        let images_enabled = options.images;
-        // `LinkMode::TextOnly` rewrites mid-text (drops `[` from the opening
-        // bracket), shifting byte offsets; `Protocol` either appends at the end
-        // or triggers early return on the sentinel marker.
-        let mutates_mid_text = link_mode == options::LinkMode::TextOnly;
-        let early_return = link_mode == options::LinkMode::Protocol;
-        entries.push(HandlerEntry::BuiltIn {
-            handler: BuiltInHandler::WithRanges(Box::new(move |text, r| {
-                link_image::handle_with_ranges(text, link_mode, links_enabled, images_enabled, r)
-            })),
-            priority: priority::LINKS,
-            early_return,
-            mutates_mid_text,
-        });
-        // Unwrapping a bracket (e.g. `[<a](` → `<a`) can expose an incomplete
-        // HTML tag that the first `html_tags` pass rejected as implausible
-        // because of the trailing `](`. Re-run `html_tags` on the unwrapped
-        // residue so the pipeline reaches its fixed point in one call.
-        if options.html_tags {
-            entries.push(HandlerEntry::BuiltIn {
-                handler: BuiltInHandler::WithRanges(Box::new(html_tags::handle_with_ranges)),
-                priority: priority::LINKS + 1,
-                early_return: false,
-                mutates_mid_text: false,
-            });
-        }
-    }
-    if options.bold_italic {
-        entries.push(HandlerEntry::BuiltIn {
-            handler: BuiltInHandler::WithRanges(Box::new(emphasis::handle_bold_italic_with_ranges)),
-            priority: priority::BOLD_ITALIC,
-            early_return: false,
-            mutates_mid_text: false,
-        });
-    }
-    if options.bold {
-        entries.push(HandlerEntry::BuiltIn {
-            handler: BuiltInHandler::WithRanges(Box::new(emphasis::handle_bold_with_ranges)),
-            priority: priority::BOLD,
-            early_return: false,
-            mutates_mid_text: false,
-        });
-    }
-    if options.italic {
-        entries.push(HandlerEntry::BuiltIn {
-            handler: BuiltInHandler::WithRanges(Box::new(
-                emphasis::handle_double_underscore_with_ranges,
-            )),
-            priority: priority::ITALIC_DOUBLE_UNDERSCORE,
-            early_return: false,
-            mutates_mid_text: false,
-        });
-        entries.push(HandlerEntry::BuiltIn {
-            handler: BuiltInHandler::WithRanges(Box::new(
-                emphasis::handle_italic_asterisk_with_ranges,
-            )),
-            priority: priority::ITALIC_SINGLE_ASTERISK,
-            early_return: false,
-            mutates_mid_text: false,
-        });
-        entries.push(HandlerEntry::BuiltIn {
-            handler: BuiltInHandler::WithRanges(Box::new(
-                emphasis::handle_italic_underscore_with_ranges,
-            )),
-            priority: priority::ITALIC_SINGLE_UNDERSCORE,
-            early_return: false,
-            mutates_mid_text: false,
-        });
-    }
-    if options.inline_code {
-        entries.push(HandlerEntry::BuiltIn {
-            handler: BuiltInHandler::Plain(Box::new(inline_code::handle)),
-            priority: priority::INLINE_CODE,
-            early_return: false,
-            mutates_mid_text: false,
-        });
-    }
-    if options.strikethrough {
-        entries.push(HandlerEntry::BuiltIn {
-            handler: BuiltInHandler::WithRanges(Box::new(strikethrough::handle_with_ranges)),
-            priority: priority::STRIKETHROUGH,
-            early_return: false,
-            mutates_mid_text: false,
-        });
-    }
-    if options.katex {
-        entries.push(HandlerEntry::BuiltIn {
-            handler: BuiltInHandler::WithRanges(Box::new(katex::handle_block_with_ranges)),
-            priority: priority::KATEX,
-            early_return: false,
-            mutates_mid_text: false,
-        });
-    }
-    if options.inline_katex {
-        entries.push(HandlerEntry::BuiltIn {
-            handler: BuiltInHandler::WithRanges(Box::new(katex::handle_inline_with_ranges)),
-            priority: priority::INLINE_KATEX,
-            early_return: false,
-            mutates_mid_text: false,
-        });
-    }
-
-    // Add custom handlers.
-    for handler in &options.handlers {
-        entries.push(HandlerEntry::Custom(handler.as_ref()));
-    }
-
-    // Sort by priority (stable sort preserves insertion order for equal priorities).
-    entries.sort_by_key(|e| e.priority());
-
-    // Share a single `CodeBlockRanges` across all range-using handlers, built
-    // lazily on first use and invalidated after any handler that may rewrite
-    // bytes in the middle of the string (custom handlers are opaque mutators).
-    let mut shared_ranges: Option<ranges::CodeBlockRanges> = None;
-
-    for entry in &entries {
-        match entry {
-            HandlerEntry::BuiltIn {
-                handler,
-                early_return,
-                mutates_mid_text,
-                ..
-            } => {
-                let before_ptr = result.as_ref().as_ptr();
-                match handler {
-                    BuiltInHandler::Plain(f) => {
-                        result = apply_with(result, |text| f(text));
-                    }
-                    BuiltInHandler::WithRanges(f) => {
-                        if shared_ranges.is_none() {
-                            shared_ranges = Some(ranges::CodeBlockRanges::new(&result));
-                        }
-                        let r = shared_ranges.as_ref().expect("ranges just initialized");
-                        result = apply_with(result, |text| f(text, r));
-                    }
-                }
-                if *early_return && result.ends_with(INCOMPLETE_LINK_MARKER) {
-                    return result;
-                }
-                if *mutates_mid_text && !std::ptr::eq(result.as_ref().as_ptr(), before_ptr) {
-                    shared_ranges = None;
-                }
-            }
-            HandlerEntry::Custom(h) => {
-                let before_ptr = result.as_ref().as_ptr();
-                result = apply_with(result, |text| h.handle(text));
-                if !std::ptr::eq(result.as_ref().as_ptr(), before_ptr) {
-                    shared_ranges = None;
-                }
-            }
-        }
-    }
-
-    result
+    run_pipeline(result, options, presence)
 }
 
-/// Fast path: fixed-order pipeline with no dynamic dispatch (used when no custom handlers).
-fn run_builtin_pipeline<'a>(
+/// A shared `CodeBlockRanges`, built lazily on first use and invalidated after
+/// any handler that may rewrite bytes in the middle of the string (custom
+/// handlers are opaque mutators). Invalidation is by pointer-compare of the
+/// before/after `Cow` payloads — cheap and conservative (a fresh buffer never
+/// shifts detection by address).
+#[derive(Default)]
+struct SharedRanges(Option<ranges::CodeBlockRanges>);
+
+impl SharedRanges {
+    /// Returns a reference to the ranges, squinting them over `text` if absent.
+    fn get_or_init<'r>(&'r mut self, text: &str) -> &'r ranges::CodeBlockRanges {
+        self.0
+            .get_or_insert_with(|| ranges::CodeBlockRanges::new(text))
+    }
+
+    /// Drop the cached ranges if the handler moved `result` to a new buffer.
+    fn invalidate_if_moved(&mut self, before: *const u8, result: &str) {
+        if !std::ptr::eq(result.as_ptr(), before) {
+            self.0 = None;
+        }
+    }
+
+    /// Opaque-mutator invalidation: always drop after a custom handler ran.
+    fn invalidate(&mut self) {
+        self.0 = None;
+    }
+}
+
+/// A built-in pipeline stage. `BUILTIN_ORDER` (below) is the single source of
+/// truth for builtin execution order in BOTH the no-custom-handlers fast path
+/// and the custom+priority-merged path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Builtin {
+    ComparisonOperators,
+    HtmlTags,
+    SetextHeadings,
+    Links,
+    /// Re-run `html_tags` on link-unwrapped residue (`[<a](` → `<a`), so the
+    /// pipeline reaches its fixed point in one call. Only fires after links
+    /// actually rewrote text in `TextOnly` mode.
+    HtmlRerunAfterLinks,
+    InlineCode,
+    SingleTilde,
+    ItalicBoldItalic,
+    ItalicBold,
+    ItalicDoubleUnderscore,
+    ItalicSingleAsterisk,
+    ItalicSingleUnderscore,
+    Strikethrough,
+    KatexBlock,
+    KatexInline,
+}
+
+/// Which trigger-group gate (from `TriggerPresence`) a builtin stage waits on.
+/// A stage is skipped when the gate's presence bit is false (provably no
+/// trigger byte in the input). The custom-handlers path opens every gate,
+/// since custom handlers' triggers are by definition unknown.
+#[derive(Clone, Copy)]
+enum Gate {
+    Emphasis,
+    Math,
+    Html,
+    Link,
+    Setext,
+}
+
+impl Builtin {
+    fn priority(self) -> i32 {
+        match self {
+            Builtin::ComparisonOperators => options::priority::COMPARISON_OPERATORS,
+            Builtin::HtmlTags => options::priority::HTML_TAGS,
+            Builtin::SetextHeadings => options::priority::SETEXT_HEADINGS,
+            Builtin::Links => options::priority::LINKS,
+            Builtin::HtmlRerunAfterLinks => options::priority::LINKS + 1,
+            Builtin::InlineCode => options::priority::INLINE_CODE,
+            Builtin::SingleTilde => options::priority::SINGLE_TILDE,
+            Builtin::ItalicBoldItalic => options::priority::BOLD_ITALIC,
+            Builtin::ItalicBold => options::priority::BOLD,
+            Builtin::ItalicDoubleUnderscore => options::priority::ITALIC_DOUBLE_UNDERSCORE,
+            Builtin::ItalicSingleAsterisk => options::priority::ITALIC_SINGLE_ASTERISK,
+            Builtin::ItalicSingleUnderscore => options::priority::ITALIC_SINGLE_UNDERSCORE,
+            Builtin::Strikethrough => options::priority::STRIKETHROUGH,
+            Builtin::KatexBlock => options::priority::KATEX,
+            Builtin::KatexInline => options::priority::INLINE_KATEX,
+        }
+    }
+
+    fn enabled(self, o: &StitchOptions) -> bool {
+        match self {
+            Builtin::ComparisonOperators => o.comparison_operators,
+            Builtin::HtmlTags => o.html_tags,
+            Builtin::SetextHeadings => o.setext_headings,
+            Builtin::Links => o.links || o.images,
+            // Compensating pass for Links — only relevant when both run.
+            Builtin::HtmlRerunAfterLinks => o.html_tags && (o.links || o.images),
+            Builtin::InlineCode => o.inline_code,
+            Builtin::SingleTilde => o.single_tilde,
+            Builtin::ItalicBoldItalic => o.bold_italic,
+            Builtin::ItalicBold => o.bold,
+            Builtin::ItalicDoubleUnderscore => o.italic,
+            Builtin::ItalicSingleAsterisk => o.italic,
+            Builtin::ItalicSingleUnderscore => o.italic,
+            Builtin::Strikethrough => o.strikethrough,
+            Builtin::KatexBlock => o.katex,
+            Builtin::KatexInline => o.inline_katex,
+        }
+    }
+
+    fn gate(self) -> Gate {
+        match self {
+            Builtin::ComparisonOperators => Gate::Html,
+            Builtin::HtmlTags => Gate::Html,
+            // The html-rerun only fires when links unwrapped a `[`, which
+            // proves `<` appeared in the source (gate mirrors HtmlTags).
+            Builtin::HtmlRerunAfterLinks => Gate::Html,
+            Builtin::SetextHeadings => Gate::Setext,
+            Builtin::Links => Gate::Link,
+            // inline_code runs BEFORE emphasis so emphasis handlers see closed
+            // code spans (idempotency; proptest `"*A***`a"`); its trigger byte
+            // is the backtick, folded into the emphasis group.
+            Builtin::InlineCode => Gate::Emphasis,
+            // single_tilde runs AFTER links: TextOnly unwrapping exposes lone
+            // `~`s the emphasis-group trigger already covers (it scans for `~`).
+            Builtin::SingleTilde => Gate::Emphasis,
+            Builtin::ItalicBoldItalic => Gate::Emphasis,
+            Builtin::ItalicBold => Gate::Emphasis,
+            Builtin::ItalicDoubleUnderscore => Gate::Emphasis,
+            Builtin::ItalicSingleAsterisk => Gate::Emphasis,
+            Builtin::ItalicSingleUnderscore => Gate::Emphasis,
+            Builtin::Strikethrough => Gate::Emphasis,
+            Builtin::KatexBlock => Gate::Math,
+            Builtin::KatexInline => Gate::Math,
+        }
+    }
+
+    /// Apply the stage to `result`, threading `shared` ranges and re-running
+    /// html_tags' fixed-point pass where required. `Stage::EarlyReturn` signals
+    /// the protocol-mode links sentinel.
+    fn run<'a>(
+        self,
+        mut result: Cow<'a, str>,
+        options: &StitchOptions,
+        shared: &mut SharedRanges,
+        gate_open: bool,
+    ) -> Stage<'a> {
+        if !gate_open {
+            return Stage::Next(result);
+        }
+        match self {
+            Builtin::ComparisonOperators => {
+                Stage::Next(apply(result, comparison_operators::handle))
+            }
+            Builtin::HtmlTags => {
+                let r = shared.get_or_init(&result);
+                Stage::Next(apply_with(result, |t| html_tags::handle_with_ranges(t, r)))
+            }
+            Builtin::SetextHeadings => Stage::Next(apply(result, setext_heading::handle)),
+            Builtin::Links => {
+                let link_mode = options.link_mode;
+                let links_enabled = options.links;
+                let images_enabled = options.images;
+                let before = result.as_ref().as_ptr();
+                let r = shared.get_or_init(&result);
+                result = apply_with(result, |t| {
+                    link_image::handle_with_ranges(t, link_mode, links_enabled, images_enabled, r)
+                });
+                if link_mode == options::LinkMode::Protocol
+                    && result.ends_with(INCOMPLETE_LINK_MARKER)
+                {
+                    return Stage::EarlyReturn(result);
+                }
+                if link_mode == options::LinkMode::TextOnly {
+                    shared.invalidate_if_moved(before, &result);
+                }
+                Stage::Next(result)
+            }
+            Builtin::HtmlRerunAfterLinks => {
+                // Only meaningful after a TextOnly rewrite (the only links
+                // mutation that can expose a mid-text `<`). With Protocol mode
+                // nothing shifts, so the first HtmlTags pass already saw a
+                // final string; skip.
+                if options.link_mode == options::LinkMode::TextOnly {
+                    let r = shared.get_or_init(&result);
+                    result = apply_with(result, |t| html_tags::handle_with_ranges(t, r));
+                }
+                Stage::Next(result)
+            }
+            Builtin::InlineCode => Stage::Next(apply(result, inline_code::handle)),
+            Builtin::SingleTilde => Stage::Next(apply(result, single_tilde::handle)),
+            Builtin::ItalicBoldItalic => {
+                let r = shared.get_or_init(&result);
+                Stage::Next(apply_with(result, |t| {
+                    emphasis::handle_bold_italic_with_ranges(t, r)
+                }))
+            }
+            Builtin::ItalicBold => {
+                let r = shared.get_or_init(&result);
+                Stage::Next(apply_with(result, |t| {
+                    emphasis::handle_bold_with_ranges(t, r)
+                }))
+            }
+            Builtin::ItalicDoubleUnderscore => {
+                let r = shared.get_or_init(&result);
+                Stage::Next(apply_with(result, |t| {
+                    emphasis::handle_double_underscore_with_ranges(t, r)
+                }))
+            }
+            Builtin::ItalicSingleAsterisk => {
+                let r = shared.get_or_init(&result);
+                Stage::Next(apply_with(result, |t| {
+                    emphasis::handle_italic_asterisk_with_ranges(t, r)
+                }))
+            }
+            Builtin::ItalicSingleUnderscore => {
+                let r = shared.get_or_init(&result);
+                Stage::Next(apply_with(result, |t| {
+                    emphasis::handle_italic_underscore_with_ranges(t, r)
+                }))
+            }
+            Builtin::Strikethrough => {
+                let r = shared.get_or_init(&result);
+                Stage::Next(apply_with(result, |t| {
+                    strikethrough::handle_with_ranges(t, r)
+                }))
+            }
+            Builtin::KatexBlock => {
+                let r = shared.get_or_init(&result);
+                Stage::Next(apply_with(result, |t| {
+                    katex::handle_block_with_ranges(t, r)
+                }))
+            }
+            Builtin::KatexInline => {
+                let r = shared.get_or_init(&result);
+                Stage::Next(apply_with(result, |t| {
+                    katex::handle_inline_with_ranges(t, r)
+                }))
+            }
+        }
+    }
+}
+
+/// Builtin execution order — ascending `priority()` except for the inline_code
+/// (26) / single_tilde (25) swap, which the idempotency regression
+/// `"*A***`a"` needs (see the doc on `options::priority::INLINE_CODE`).
+/// When custom handlers join, they merge into this order by priority; the
+/// custom sort is stable, so the relative order of equal-priority builtins is
+/// preserved as written here.
+const BUILTIN_ORDER: &[Builtin] = &[
+    Builtin::ComparisonOperators,
+    Builtin::HtmlTags,
+    Builtin::SetextHeadings,
+    Builtin::Links,
+    Builtin::HtmlRerunAfterLinks,
+    Builtin::InlineCode,
+    Builtin::SingleTilde,
+    Builtin::ItalicBoldItalic,
+    Builtin::ItalicBold,
+    Builtin::ItalicDoubleUnderscore,
+    Builtin::ItalicSingleAsterisk,
+    Builtin::ItalicSingleUnderscore,
+    Builtin::Strikethrough,
+    Builtin::KatexBlock,
+    Builtin::KatexInline,
+];
+
+/// Outcome of running one stage: `Next` continues the pipeline; `EarlyReturn`
+/// is the Protocol-mode incomplete-link sentinel, and the pipeline must stop
+/// before downstream handlers mangle the placeholder.
+enum Stage<'a> {
+    Next(Cow<'a, str>),
+    EarlyReturn(Cow<'a, str>),
+}
+
+impl Builtin {
+    fn gate_open(self, presence: TriggerPresence) -> bool {
+        match self.gate() {
+            Gate::Emphasis => presence.emphasis,
+            Gate::Math => presence.math,
+            Gate::Html => presence.html,
+            Gate::Link => presence.link,
+            Gate::Setext => presence.setext,
+        }
+    }
+}
+
+/// Which pipeline mode: no-custom fast path (per-stage gates consulted) or
+/// custom-merged path (interleaved by priority; gates treated as OPEN because
+/// custom handlers have unknown triggers — matches the original semantics).
+fn run_pipeline<'a>(
     mut result: Cow<'a, str>,
     options: &StitchOptions,
     presence: TriggerPresence,
 ) -> Cow<'a, str> {
-    // Per-group presence gates (x3): a handler whose trigger byte is provably
-    // absent cannot rewrite anything, so its O(n) pass is skipped. Pipeline
-    // ORDER and per-handler semantics are unchanged; only no-op passes drop
-    // out. Safety of the links->html re-run: the only way `link_image`
-    // exposes html (`[<a](` unwrapping) requires `<` present already.
-    if options.comparison_operators && presence.html {
-        result = apply(result, comparison_operators::handle);
-    }
+    let mut shared = SharedRanges::default();
+    let custom = !options.handlers.is_empty();
 
-    // Compute CodeBlockRanges once for all handlers that need code-block detection,
-    // converting ~15 O(n) scans per streaming delta into 1 O(n) scan + O(log n) queries.
-    //
-    // Must be `mut` because `link_image` in `LinkMode::TextOnly` can remove a `[`
-    // byte from the middle of the string, shifting every subsequent byte offset.
-    // Stale ranges would then mis-report code regions to downstream handlers.
-    let needs_ranges = (options.html_tags && presence.html)
-        || (options.links || options.images) && presence.link
-        || (options.bold_italic || options.bold || options.italic || options.strikethrough)
-            && presence.emphasis
-        || (options.katex || options.inline_katex) && presence.math;
-    let mut ranges = needs_ranges.then(|| ranges::CodeBlockRanges::new(&result));
+    // Customs sorted by priority (stable → ties keep registration order, as
+    // did the old pipeline's `sort_by_key` over push order).
+    let mut customs: Vec<&dyn StitchHandler> = options.handlers.iter().map(|h| &**h).collect();
+    customs.sort_by_key(|h| h.priority());
+    let mut custom_idx = 0usize;
 
-    if options.html_tags
-        && presence.html
-        && let Some(ref r) = ranges
-    {
-        result = apply_with(result, |text| html_tags::handle_with_ranges(text, r));
-    }
-    if options.setext_headings && presence.setext {
-        result = apply(result, setext_heading::handle);
-    }
-    if (options.links || options.images)
-        && presence.link
-        && let Some(ref r_guard) = ranges
-    {
-        let link_mode = options.link_mode;
-        let links_enabled = options.links;
-        let images_enabled = options.images;
-        let before_ptr = result.as_ref().as_ptr();
-        result = apply_with(result, move |text| {
-            link_image::handle_with_ranges(text, link_mode, links_enabled, images_enabled, r_guard)
-        });
-        if result.ends_with(INCOMPLETE_LINK_MARKER) {
-            return result;
+    // Builtin stages in `BUILTIN_ORDER`, spliced with customs at each custom's
+    // `priority()`. A custom at exactly the builtin's priority runs AFTER the
+    // builtin (matches the old "builtins pushed first, customs pushed last,
+    // stable sort" ordering).
+    for &b in BUILTIN_ORDER {
+        while let Some(&h) = customs.get(custom_idx)
+            && h.priority() < b.priority()
+        {
+            result = apply_with(result, |t| h.handle(t));
+            shared.invalidate();
+            custom_idx += 1;
         }
-        // Mid-text mutation (e.g. TextOnly mode removing `[`) shifts every
-        // later byte; rebuild ranges so downstream handlers see correct offsets.
-        if !std::ptr::eq(result.as_ref().as_ptr(), before_ptr) {
-            ranges = Some(ranges::CodeBlockRanges::new(&result));
-            // Unwrapping a bracket (e.g. `[<a](` → `<a`) can expose an incomplete
-            // HTML tag that the first `html_tags` pass rejected as implausible
-            // because of the trailing `](`. Re-run `html_tags` on the unwrapped
-            // residue so the pipeline reaches its fixed point in one call.
-            if options.html_tags
-                && let Some(ref r) = ranges
-            {
-                result = apply_with(result, |text| html_tags::handle_with_ranges(text, r));
-            }
+        if !b.enabled(options) {
+            continue;
+        }
+        // Gate: fast path consults the trigger scan; the custom path leaves
+        // every gate open (customs may introduce triggers mid-pipeline).
+        let open = custom || b.gate_open(presence);
+        match b.run(result, options, &mut shared, open) {
+            Stage::Next(next) => result = next,
+            Stage::EarlyReturn(done) => return done,
         }
     }
-    // single_tilde runs AFTER links/images: TextOnly link unwrapping can
-    // delete a `[` and expose a lone `~` that must still be escaped for the
-    // pipeline to be idempotent (proptest regression: `"a~[A"`).
-    // Gating on the ENTRY text's presence: the `~` the comment worries about
-    // sat in the entry text already (unwrapping removes `[`, never adds `~`),
-    // so presence.emphasis covers it.
-    if options.single_tilde && presence.emphasis {
-        result = apply(result, single_tilde::handle);
-    }
-    // inline_code runs BEFORE emphasis: closing an open backtick first lets
-    // the emphasis handlers see a real code span and skip its contents,
-    // keeping the pipeline idempotent (proptest regression: `"*A***`a"`).
-    if options.inline_code && presence.emphasis {
-        result = apply(result, inline_code::handle);
-    }
-    if presence.emphasis
-        && let Some(ref r) = ranges
-    {
-        if options.bold_italic {
-            result = apply_with(result, |text| {
-                emphasis::handle_bold_italic_with_ranges(text, r)
-            });
-        }
-        if options.bold {
-            result = apply_with(result, |text| emphasis::handle_bold_with_ranges(text, r));
-        }
-        if options.italic {
-            result = apply_with(result, |text| {
-                emphasis::handle_double_underscore_with_ranges(text, r)
-            });
-            result = apply_with(result, |text| {
-                emphasis::handle_italic_asterisk_with_ranges(text, r)
-            });
-            result = apply_with(result, |text| {
-                emphasis::handle_italic_underscore_with_ranges(text, r)
-            });
-        }
-        if options.strikethrough {
-            result = apply_with(result, |text| strikethrough::handle_with_ranges(text, r));
+    if custom {
+        // Trailing customs (priority above every builtin's).
+        while let Some(&h) = customs.get(custom_idx) {
+            result = apply_with(result, |t| h.handle(t));
+            custom_idx += 1;
         }
     }
-    if presence.math
-        && let Some(ref r) = ranges
-    {
-        if options.katex {
-            result = apply_with(result, |text| katex::handle_block_with_ranges(text, r));
-        }
-        if options.inline_katex {
-            result = apply_with(result, |text| katex::handle_inline_with_ranges(text, r));
-        }
-    }
-    // (inline_code already ran before the ranges block; no else-branch needed.)
-
     result
 }
 
@@ -590,3 +550,27 @@ fn apply_with<'a>(input: Cow<'a, str>, handler: impl FnOnce(&str) -> Cow<'_, str
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod pipeline_tests {
+    use super::BUILTIN_ORDER;
+
+    /// Execution order must match ascending `priority()` — the priority sort
+    /// in the custom-handler path is only correct if the base table already
+    /// ships sorted.
+    #[test]
+    fn builtin_order_is_priority_sorted() {
+        let mut prev = i32::MIN;
+        for &b in BUILTIN_ORDER {
+            assert!(
+                b.priority() >= prev,
+                "BUILTIN_ORDER entry {b:?} has priority {} after {prev}",
+                b.priority()
+            );
+            prev = b.priority();
+        }
+        // Sanity: the table and the enum's variants are in 1:1 correspondence
+        // (minus none, plus the html-rerun pseudo-stage).
+        assert_eq!(BUILTIN_ORDER.len(), 15);
+    }
+}

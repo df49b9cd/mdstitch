@@ -31,38 +31,41 @@ pub trait StitchHandler: Send + Sync {
 /// Built-in handler priorities.
 ///
 /// Lower values run first. Custom handlers default to [`priority::DEFAULT`].
+///
+/// Execution order matches ascending priority; the only intentional
+/// adjacency constraint is `INLINE_CODE` (25) before `SINGLE_TILDE` (26):
+/// inline_code closes an open backtick BEFORE single_tilde escapes `~`s, so
+/// emphasis handlers see closed code spans (idempotency; proptest regression
+/// `"*A***`a"`). Both still run after `LINKS` (TextOnly unwrapping can expose
+/// a lone `~` that must still be escaped — proptest regression `"a~[A"`).
 pub mod priority {
-    /// Priority for single-tilde escaping. Runs after LINKS (20) because link
-    /// unwrapping can expose lone tildes that still need escaping
-    /// (idempotency; proptest regression `"a~[A"`).
-    pub const SINGLE_TILDE: i32 = 25;
-    /// Priority for comparison operator escaping in lists.
+    /// Comparison operator escaping in lists.
     pub const COMPARISON_OPERATORS: i32 = 5;
-    /// Priority for incomplete HTML tag stripping.
+    /// Incomplete HTML tag stripping.
     pub const HTML_TAGS: i32 = 10;
-    /// Priority for setext heading detection.
+    /// Setext heading detection.
     pub const SETEXT_HEADINGS: i32 = 15;
-    /// Priority for link and image completion.
+    /// Link and image completion.
     pub const LINKS: i32 = 20;
-    /// Priority for bold-italic (`***`) completion.
+    /// Inline code (`` ` ``) completion.
+    pub const INLINE_CODE: i32 = 25;
+    /// Single-tilde escaping.
+    pub const SINGLE_TILDE: i32 = 26;
+    /// Bold-italic (`***`) completion.
     pub const BOLD_ITALIC: i32 = 30;
-    /// Priority for bold (`**`) completion.
+    /// Bold (`**`) completion.
     pub const BOLD: i32 = 35;
-    /// Priority for double-underscore (`__`) italic completion.
+    /// Double-underscore (`__`) italic completion.
     pub const ITALIC_DOUBLE_UNDERSCORE: i32 = 40;
-    /// Priority for single-asterisk (`*`) italic completion.
+    /// Single-asterisk (`*`) italic completion.
     pub const ITALIC_SINGLE_ASTERISK: i32 = 41;
-    /// Priority for single-underscore (`_`) italic completion.
+    /// Single-underscore (`_`) italic completion.
     pub const ITALIC_SINGLE_UNDERSCORE: i32 = 42;
-    /// Priority for inline code (`` ` ``) completion. Runs before emphasis so
-    /// emphasis handlers see closed code spans (idempotency; proptest
-    /// regression `"*A***`a"`).
-    pub const INLINE_CODE: i32 = 26;
-    /// Priority for strikethrough (`~~`) completion.
+    /// Strikethrough (`~~`) completion.
     pub const STRIKETHROUGH: i32 = 60;
-    /// Priority for block KaTeX (`$$`) completion.
+    /// Block KaTeX (`$$`) completion.
     pub const KATEX: i32 = 70;
-    /// Priority for inline KaTeX (`$`) completion.
+    /// Inline KaTeX (`$`) completion.
     pub const INLINE_KATEX: i32 = 75;
     /// Default priority for custom handlers.
     pub const DEFAULT: i32 = 100;

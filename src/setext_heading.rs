@@ -1,6 +1,10 @@
 use std::borrow::Cow;
 
-use super::utils::cow_append;
+use super::utils::{CODE_INDENT_COLS, cow_append, leading_indent_cols};
+
+/// Zero-width space appended after a partial setext underline so CommonMark
+/// stops reading it as a heading.
+const SETEXT_BREAK_MARKER: &str = "\u{200B}";
 
 /// Detects if text ends with a potential incomplete setext heading underline
 /// and adds a zero-width space to break the pattern.
@@ -19,7 +23,7 @@ pub fn handle(text: &str) -> Cow<'_, str> {
 
     // CM: a setext heading underline must have < 4 columns of leading
     // whitespace — 4+ columns makes the line an indented code block.
-    if leading_indent_cols(last_line) >= 4 {
+    if leading_indent_cols(last_line) >= CODE_INDENT_COLS {
         return Cow::Borrowed(text);
     }
 
@@ -49,19 +53,7 @@ pub fn handle(text: &str) -> Cow<'_, str> {
     }
 
     // Add zero-width space to break the setext heading pattern.
-    cow_append(text, "\u{200B}")
-}
-
-fn leading_indent_cols(line: &str) -> usize {
-    let mut cols = 0usize;
-    for ch in line.chars() {
-        match ch {
-            ' ' => cols += 1,
-            '\t' => cols = (cols / 4 + 1) * 4,
-            _ => break,
-        }
-    }
-    cols
+    cow_append(text, SETEXT_BREAK_MARKER)
 }
 
 #[cfg(test)]

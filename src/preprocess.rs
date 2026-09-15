@@ -7,6 +7,8 @@
 
 use std::borrow::Cow;
 
+use crate::utils::{CODE_INDENT_COLS, leading_indent_cols};
+
 /// Preprocesses custom HTML tags to prevent blank lines within them from
 /// causing CommonMark to split the block.
 ///
@@ -224,20 +226,10 @@ pub fn normalize_html_indentation(text: &str) -> Cow<'_, str> {
 
         // Count leading whitespace in columns (spaces=1, tabs advance to next multiple of 4).
         let trimmed = line.trim_start_matches([' ', '\t']);
-        let indent_cols = {
-            let mut col = 0usize;
-            for ch in line[..line.len() - trimmed.len()].chars() {
-                match ch {
-                    ' ' => col += 1,
-                    '\t' => col = (col / 4 + 1) * 4,
-                    _ => break,
-                }
-            }
-            col
-        };
+        let indent_cols = leading_indent_cols(line);
 
         // If 4+ columns of indentation and the rest starts with an HTML tag, strip it.
-        if indent_cols >= 4 && starts_with_html_tag_char(trimmed) {
+        if indent_cols >= CODE_INDENT_COLS && starts_with_html_tag_char(trimmed) {
             result.push_str(trimmed);
             changed = true;
         } else {

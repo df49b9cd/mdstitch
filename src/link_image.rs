@@ -1,9 +1,33 @@
 use std::borrow::Cow;
 
+use super::INCOMPLETE_LINK_MARKER;
 use super::bracket::{find_matching_closing_bracket, find_matching_opening_bracket};
 use super::options::LinkMode;
 use super::ranges::CodeBlockRanges;
 use super::utils::is_list_marker_line;
+
+/// Returns the byte index just past the URL's closing `)` if a `)` appears on
+/// the same line as `](` at `after_paren_start` (with a leading CR/LF skip so
+/// a stream-chunk boundary between `](` and the URL still counts), else None.
+/// Both `\n` and `\r` terminate the URL line so lone-`\r` input is consistent.
+fn extend_past_url_if_terminated(text: &str, after_paren_start: usize) -> Option<usize> {
+    let raw = &text[after_paren_start..];
+    let skipped = raw.len() - raw.trim_start_matches(['\r', '\n']).len();
+    let line = &raw[skipped..];
+    let line_end = line
+        .bytes()
+        .position(|b| matches!(b, b'\n' | b'\r'))
+        .unwrap_or(line.len());
+    line[..line_end]
+        .find(')')
+        .map(|paren_rel| after_paren_start + skipped + paren_rel + 1)
+}
+
+/// `true` if the URL starting at `after_paren_start` is closed by a `)` on its
+/// own line — the boolean projection of [`extend_past_url_if_terminated`].
+fn is_url_line_terminated(text: &str, after_paren_start: usize) -> bool {
+    extend_past_url_if_terminated(text, after_paren_start).is_some()
+}
 
 /// Handles incomplete URLs in links/images: `[text](partial-url`.
 fn handle_incomplete_url<'a>(
@@ -15,17 +39,7 @@ fn handle_incomplete_url<'a>(
     // `bracket_paren_index` points to `]` in `](`.
     // Only consider `)` on the same line — a `)` later in the document
     // (e.g., from an emoticon or another link) should not prevent completion.
-    //
-    // Skip any leading CR/LF so a URL placed on a subsequent line (e.g. a
-    // stream-chunk boundary that splits `](` from the URL) is still recognized.
-    // Then byte-scan to the next CR/LF — treating both as terminators keeps
-    // behavior consistent for lone `\r` input too.
-    let after_paren = text[bracket_paren_index + 2..].trim_start_matches(['\r', '\n']);
-    let line_end = after_paren
-        .bytes()
-        .position(|b| matches!(b, b'\n' | b'\r'))
-        .unwrap_or(after_paren.len());
-    if after_paren[..line_end].contains(')') {
+    if is_url_line_terminated(text, bracket_paren_index + 2) {
         return None; // URL is complete.
     }
 
@@ -156,17 +170,11 @@ fn find_last_incomplete_bracket(text: &str, ranges: &CodeBlockRanges) -> Option<
                 return Some(j);
             }
             if let Some(close_idx) = find_matching_closing_bracket(text, j, ranges) {
-                if close_idx + 1 < bytes.len() && bytes[close_idx + 1] == b'(' {
-                    let raw = &text[close_idx + 2..];
-                    let skipped = raw.len() - raw.trim_start_matches(['\r', '\n']).len();
-                    let after_paren = &raw[skipped..];
-                    let line_end = after_paren
-                        .bytes()
-                        .position(|b| matches!(b, b'\n' | b'\r'))
-                        .unwrap_or(after_paren.len());
-                    if !after_paren[..line_end].contains(')') {
-                        return Some(j);
-                    }
+                if close_idx + 1 < bytes.len()
+                    && bytes[close_idx + 1] == b'('
+                    && !is_url_line_terminated(text, close_idx + 2)
+                {
+                    return Some(j);
                 }
             } else {
                 return Some(j);
@@ -193,19 +201,11 @@ fn find_first_incomplete_bracket(text: &str, max_pos: usize, ranges: &CodeBlockR
                 // Check if it's a full link `[text](url)` -- but only if `)` is
                 // on the same line (links cannot span lines per CommonMark).
                 if close_idx + 1 < bytes.len() && bytes[close_idx + 1] == b'(' {
-                    // Skip a leading CR/LF so a URL placed on a subsequent line
-                    // (chunk boundary splitting `](` from the URL) is still
-                    // recognized -- must mirror handle_incomplete_url exactly.
-                    let raw = &text[close_idx + 2..];
-                    let skipped = raw.len() - raw.trim_start_matches(['\r', '\n']).len();
-                    let after_paren = &raw[skipped..];
-                    let line_end = after_paren
-                        .bytes()
-                        .position(|b| matches!(b, b'\n' | b'\r'))
-                        .unwrap_or(after_paren.len());
-                    if let Some(url_end) = after_paren[..line_end].find(')') {
+                    if let Some(past_close_paren) =
+                        extend_past_url_if_terminated(text, close_idx + 2)
+                    {
                         // Skip past this complete link.
-                        j = close_idx + 2 + skipped + url_end + 1;
+                        j = past_close_paren;
                         continue;
                     }
                     // ) is not on the same line -- the link is incomplete per CommonMark.
@@ -248,7 +248,7 @@ fn make_incomplete_link<'a>(text: &str, link_mode: LinkMode) -> Cow<'a, str> {
             Cow::Owned(current)
         }
         LinkMode::Protocol => {
-            const MARKER: &str = "](stitch:incomplete-link)";
+            const MARKER: &str = INCOMPLETE_LINK_MARKER;
             // Don't re-append: the only unmatched `[` is a prefix to an
             // already-completed link, and appending would break idempotency.
             if text.ends_with(MARKER) {
