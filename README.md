@@ -24,8 +24,12 @@ without incurring a copy when the text is already closed.
 
 ## Status
 
-Published on crates.io. Extracted from [`tahoe-gpui`](https://github.com/df49b9cd/tahoe-gpui)
-and used for streaming Markdown rendering.
+Published on [crates.io](https://crates.io/crates/mdstitch). Extracted from
+[`tahoe-gpui`](https://github.com/df49b9cd/tahoe-gpui) and used for streaming
+Markdown rendering.
+
+To release a new version: bump `version` in `Cargo.toml`, commit, tag
+`v<major>.<minor>.<patch>`, and push — CI publishes to crates.io automatically.
 
 ## Usage
 
