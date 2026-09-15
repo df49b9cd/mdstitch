@@ -1,6 +1,6 @@
 #![doc(
-    html_logo_url = "https://raw.githubusercontent.com/df49b9cd/tahoe-gpui/main/crates/mdstitch/branding/mdstitch-icon.png",
-    html_favicon_url = "https://raw.githubusercontent.com/df49b9cd/tahoe-gpui/main/crates/mdstitch/branding/mdstitch-icon.png"
+    html_logo_url = "https://raw.githubusercontent.com/df49b9cd/mdstitch/master/branding/mdstitch-icon.png",
+    html_favicon_url = "https://raw.githubusercontent.com/df49b9cd/mdstitch/master/branding/mdstitch-icon.png"
 )]
 //! Streaming markdown preprocessor that auto-completes incomplete syntax.
 //!

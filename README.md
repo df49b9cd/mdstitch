@@ -24,8 +24,8 @@ without incurring a copy when the text is already closed.
 
 ## Status
 
-Published on crates.io. Consumed by [`tahoe-gpui`](../tahoe-gpui) for
-streaming Markdown rendering.
+Published on crates.io. Extracted from [`tahoe-gpui`](https://github.com/df49b9cd/tahoe-gpui)
+and used for streaming Markdown rendering.
 
 ## Usage
 
@@ -42,8 +42,7 @@ let completed = stitch(partial, &StitchOptions::default());
 assert_eq!(completed.as_ref(), "Hello **wor**");
 ```
 
-Inside `tahoe-gpui`, the incremental parser opts in with
-`with_stitch` (see `crates/tahoe-gpui/src/markdown/parser/mod.rs:69`):
+Inside `tahoe-gpui`, the incremental parser opts in with `with_stitch`:
 
 ```rust
 use mdstitch::StitchOptions;
@@ -199,4 +198,4 @@ Proptest regressions are committed under `proptest-regressions/tests.txt`.
 
 ## License
 
-Apache-2.0. See [LICENSE](../../LICENSE) at the workspace root.
+Apache-2.0. See [LICENSE](LICENSE).
