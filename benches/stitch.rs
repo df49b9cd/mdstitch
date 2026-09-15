@@ -12,8 +12,9 @@
 //! tuple (bench geomean, warnings, test_count) is computed by
 //! `.scripts/evo-score.sh`.
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use mdstitch::{StitchOptions, stitch};
+use std::hint::black_box;
 
 /// Build a ~N-byte markdown document exercising every builtin handler: bold,
 /// italic, strikethrough, fenced code, links, images, katex, html tags, setext

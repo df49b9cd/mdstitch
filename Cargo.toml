@@ -1,6 +1,6 @@
 [package]
 edition = "2024"
-rust-version = "1.95.0"
+rust-version = "1.98.1"
 name = "mdstitch"
 version = "0.1.0"
 authors = ["Soeren Magnus Olesen"]
@@ -34,7 +34,7 @@ name = "mdstitch"
 path = "src/lib.rs"
 
 [dev-dependencies]
-criterion = { version = "0.5" }
+criterion = { version = "0.8" }
 proptest = { version = "1.11.0" }
 
 [[bench]]
