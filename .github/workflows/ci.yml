@@ -26,19 +26,19 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build
-        run: cargo build --locked --all-targets
+        run: cargo build --all-targets
 
       - name: Test
-        run: cargo test --locked
+        run: cargo test
 
       - name: Clippy (deny warnings)
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Format
         run: cargo fmt --all -- --check
 
       - name: Doc
-        run: cargo doc --locked --no-deps
+        run: cargo doc --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
 
@@ -58,4 +58,4 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Check benches
-        run: cargo check --locked --benches --all-targets
+        run: cargo check --benches --all-targets
