@@ -245,11 +245,30 @@ fn codeonly(c: &mut Criterion) {
     });
 }
 
+/// Plain-prose incremental cost, the per-token shape that hits the
+/// whole-pipeline marker-absence early-out on every delta. Complements
+/// `stitch_plain_full_256KiB` (settle shape) so the `scan_triggers` constant in
+/// lib.rs's preamble — the ~26 µs/256 KiB SIMD scan — is exercised on the
+/// streaming path too, not just the one-shot pass.
+fn plain_incremental(c: &mut Criterion) {
+    let doc = plain_doc(64 * 1024);
+    let lens: &[usize] = &[256, 1024, 4096, 16_384, 65_536];
+    let mut group = c.benchmark_group("stitch_plain_incremental");
+    for &n in lens {
+        let prefix = &doc[..n.min(doc.len())];
+        group.bench_with_input(BenchmarkId::from_parameter(n), prefix, |b, input| {
+            b.iter(|| black_box(stitch(black_box(input), &options())))
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     incremental,
     full_doc,
     plain_full,
+    plain_incremental,
     codeonly,
     canaries
 );

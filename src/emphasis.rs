@@ -4,7 +4,8 @@ use super::fence::{FenceScanner, fence_run_length, for_each_byte_outside_fence};
 use super::ranges::CodeBlockRanges;
 use super::utils::{
     cow_append, ends_with_odd_backslashes, find_trailing_delimiter, is_empty_or_markers,
-    is_escaped, is_horizontal_rule, is_list_marker_line, is_word_char,
+    is_escaped, is_horizontal_rule, is_list_marker_line, is_word_char, is_ws_byte,
+    word_internal_at,
 };
 
 // ---------------------------------------------------------------------------
@@ -40,23 +41,16 @@ fn should_skip_asterisk(text: &str, index: usize, prev: u8, next: u8) -> bool {
     }
 
     // Skip if word-internal (use proper Unicode char lookup).
-    if index > 0 && index + 1 < text.len() {
-        let prev_char = text[..index].chars().next_back();
-        let next_char = text[index + 1..].chars().next();
-        if let (Some(pc), Some(nc)) = (prev_char, next_char)
-            && is_word_char(pc)
-            && is_word_char(nc)
-        {
-            return true;
-        }
+    if word_internal_at(text, index) {
+        return true;
     }
 
     // Asymmetric: SOF is ws (so "* foo" stays a list bullet); EOF is not
     // (so our own trailing `*` remains countable as a closer). CommonMark
     // treats `\r`, `\n`, and `\r\n` as line terminators, so `\r` flanks
     // like `\n` here.
-    let prev_ws = prev == 0 || matches!(prev, b' ' | b'\t' | b'\n' | b'\r');
-    let next_ws = matches!(next, b' ' | b'\t' | b'\n' | b'\r');
+    let prev_ws = prev == 0 || is_ws_byte(prev);
+    let next_ws = is_ws_byte(next);
     if prev_ws && next_ws {
         return true;
     }
@@ -135,15 +129,8 @@ fn should_skip_underscore(
         return true;
     }
     // Skip if word-internal (use proper Unicode char lookup for multi-byte chars).
-    if index > 0 && index + 1 < text.len() {
-        let prev_char = text[..index].chars().next_back();
-        let next_char = text[index + 1..].chars().next();
-        if let (Some(pc), Some(nc)) = (prev_char, next_char)
-            && is_word_char(pc)
-            && is_word_char(nc)
-        {
-            return true;
-        }
+    if word_internal_at(text, index) {
+        return true;
     }
     false
 }
@@ -219,36 +206,18 @@ pub fn count_triple_asterisks(text: &str) -> usize {
 
 fn count_double_markers_outside_code_blocks(text: &str, marker: u8) -> usize {
     let bytes = text.as_bytes();
-    let len = bytes.len();
     let mut count = 0;
-    let mut scanner = FenceScanner::new();
-    let mut i = 0;
-    let mut line_start = 0usize;
-
-    while i < len {
-        if i == line_start
-            && let Some(next) = scanner.consume_fence_at_line_start(bytes, line_start)
-        {
-            i = next;
-            continue;
+    let mut run_len = 0usize;
+    for_each_byte_outside_fence(bytes, |byte, _, _| {
+        if byte != marker {
+            // ⌊n/2⌋ per run — matches the i+=2 step semantics for any length.
+            count += run_len / 2;
+            run_len = 0;
+        } else {
+            run_len += 1;
         }
-        if scanner.in_code_block() {
-            if bytes[i] == b'\n' {
-                line_start = i + 1;
-            }
-            i += 1;
-            continue;
-        }
-        if bytes[i] == marker && i + 1 < len && bytes[i + 1] == marker {
-            count += 1;
-            i += 2;
-            continue;
-        }
-        if bytes[i] == b'\n' {
-            line_start = i + 1;
-        }
-        i += 1;
-    }
+    });
+    count += run_len / 2;
     count
 }
 
@@ -450,8 +419,8 @@ fn find_first_single_marker_index_with_ranges(
             }
             if marker == b'*' {
                 // Asymmetric: SOF is ws, EOF is not — see should_skip_asterisk.
-                let prev_ws = prev == 0 || matches!(prev, b' ' | b'\t' | b'\n' | b'\r');
-                let next_ws = matches!(next, b' ' | b'\t' | b'\n' | b'\r');
+                let prev_ws = prev == 0 || is_ws_byte(prev);
+                let next_ws = is_ws_byte(next);
                 if prev_ws && next_ws {
                     i += 1;
                     continue;
@@ -459,16 +428,9 @@ fn find_first_single_marker_index_with_ranges(
             }
 
             // Skip if word-internal (Unicode-aware).
-            if i > 0 && i + 1 < text.len() {
-                let pc = text[..i].chars().next_back();
-                let nc = text[i + 1..].chars().next();
-                if let (Some(pc), Some(nc)) = (pc, nc)
-                    && is_word_char(pc)
-                    && is_word_char(nc)
-                {
-                    i += 1;
-                    continue;
-                }
+            if word_internal_at(text, i) {
+                i += 1;
+                continue;
             }
 
             return Some(i);
@@ -664,8 +626,8 @@ pub(crate) fn handle_italic_asterisk_with_ranges<'a>(
             } else {
                 0
             };
-            let prev_ws = prev == 0 || matches!(prev, b' ' | b'\t' | b'\n' | b'\r');
-            let next_ws = next == 0 || matches!(next, b' ' | b'\t' | b'\n' | b'\r');
+            let prev_ws = prev == 0 || is_ws_byte(prev);
+            let next_ws = next == 0 || is_ws_byte(next);
             if !prev_ws && next_ws {
                 return Cow::Borrowed(text);
             }
@@ -713,7 +675,7 @@ pub(crate) fn handle_italic_underscore_with_ranges<'a>(
             return Cow::Borrowed(text);
         }
         // Check if we need to insert `_` before trailing `**` for proper nesting.
-        if let Some(result) = handle_trailing_asterisks_for_underscore(text) {
+        if let Some(result) = handle_trailing_asterisks_for_underscore(text, ranges) {
             return Cow::Owned(result);
         }
         // Same idea for a single trailing `*`: appending `_` after it would
@@ -736,8 +698,7 @@ fn handle_trailing_single_asterisk_for_underscore(text: &str) -> Option<String> 
         return None;
     }
     let before = &text[..text.len() - 1];
-    let prev_char = before.chars().next_back()?;
-    if !is_word_char(prev_char) {
+    if !before.chars().next_back().is_some_and(is_word_char) {
         return None;
     }
     let mut result = String::with_capacity(text.len() + 1);
@@ -749,7 +710,14 @@ fn handle_trailing_single_asterisk_for_underscore(text: &str) -> Option<String> 
 
 /// If text ends with `**` that was added to close an unclosed bold,
 /// and there's an unclosed `_` before it, insert `_` before the `**`.
-fn handle_trailing_asterisks_for_underscore(text: &str) -> Option<String> {
+///
+/// Reuses the caller's `ranges`: `without` is a strict prefix of `text` (only
+/// trailing `**` dropped), so no position shifts and the precomputed ranges
+/// stay valid.
+fn handle_trailing_asterisks_for_underscore(
+    text: &str,
+    ranges: &CodeBlockRanges,
+) -> Option<String> {
     if !text.ends_with("**") {
         return None;
     }
@@ -761,8 +729,7 @@ fn handle_trailing_asterisks_for_underscore(text: &str) -> Option<String> {
     }
 
     let first_double = without.find("**")?;
-    let without_ranges = CodeBlockRanges::new(without);
-    let underscore_idx = find_first_single_underscore_index_with_ranges(without, &without_ranges)?;
+    let underscore_idx = find_first_single_underscore_index_with_ranges(without, ranges)?;
 
     if first_double < underscore_idx {
         let mut result = String::with_capacity(text.len() + 1);
@@ -806,7 +773,7 @@ pub(crate) fn handle_bold_italic_with_ranges<'a>(
     ranges: &CodeBlockRanges,
 ) -> Cow<'a, str> {
     // Don't process if text is only 4+ asterisks.
-    if text.len() >= 4 && text.bytes().all(|b| b == b'*') {
+    if is_asterisk_run(text) {
         return Cow::Borrowed(text);
     }
 
@@ -845,6 +812,12 @@ pub(crate) fn handle_bold_italic_with_ranges<'a>(
     }
 
     Cow::Borrowed(text)
+}
+
+/// Returns `true` if `text` is a run of four or more `*` and nothing else
+/// (already a horizontal rule; nothing to complete).
+fn is_asterisk_run(text: &str) -> bool {
+    text.len() >= 4 && text.bytes().all(|b| b == b'*')
 }
 
 #[cfg(test)]

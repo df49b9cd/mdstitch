@@ -481,6 +481,10 @@ proptest! {
     //   s = "`$\n$*", italic + inline_katex (katex/italic interaction)
     // All seeds are preserved in proptest-regressions/tests.txt for the
     // upstream crate (tahoe-gpui). Run with --ignored to hunt more.
+    //
+    // TODO(upstream-link): file/track the remaining seed at
+    // https://github.com/df49b9cd/mdstitch/issues so the #[ignore] is
+    // externally visible rather than silently gated here.
     #[ignore]
     #[test]
     fn fuzz_idempotent_all_option_combinations(

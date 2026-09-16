@@ -9,6 +9,42 @@ pub fn is_word_char(ch: char) -> bool {
     ch.is_alphanumeric() || ch == '_'
 }
 
+/// Leading indent of `line` in CommonMark columns: each space is 1, each tab
+/// advances to the next multiple of 4.
+pub(crate) fn leading_indent_cols(line: &str) -> usize {
+    let mut cols = 0usize;
+    for ch in line.chars() {
+        match ch {
+            ' ' => cols += 1,
+            '\t' => cols = (cols / 4 + 1) * 4,
+            _ => break,
+        }
+    }
+    cols
+}
+
+/// CommonMark's 4-column threshold at which leading indentation stops being
+/// "up to 3 spaces" and starts an indented code block.
+pub(crate) const CODE_INDENT_COLS: usize = 4;
+
+/// Returns `true` if `b` is a CommonMark whitespace byte (space, tab, or line
+/// ending). Not necessarily NUL: callers wishing SOF to count as whitespace
+/// must combine `b == 0 || is_ws_byte(b)` explicitly (SOF is not a byte).
+pub(crate) fn is_ws_byte(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | b'\r')
+}
+
+/// Returns `true` if the marker at byte index `i` has word chars on both
+/// sides (underscore-styled word-internal emphasis must not be stitched).
+pub(crate) fn word_internal_at(text: &str, i: usize) -> bool {
+    if i == 0 || i + 1 >= text.len() {
+        return false;
+    }
+    let prev = text[..i].chars().next_back();
+    let next = text[i + 1..].chars().next();
+    matches!((prev, next), (Some(p), Some(n)) if is_word_char(p) && is_word_char(n))
+}
+
 /// Returns `true` if the byte at `pos` is preceded by a backslash that is not
 /// itself escaped. In other words, the character at `pos` is backslash-escaped.
 ///
