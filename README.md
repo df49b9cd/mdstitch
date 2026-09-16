@@ -1,7 +1,16 @@
 # mdstitch
 
+[![Crates.io](https://img.shields.io/crates/v/mdstitch.svg)](https://crates.io/crates/mdstitch)
+[![Documentation](https://docs.rs/mdstitch/badge.svg)](https://docs.rs/mdstitch)
+[![CI](https://github.com/df49b9cd/mdstitch/actions/workflows/ci.yml/badge.svg)](https://github.com/df49b9cd/mdstitch/actions/workflows/ci.yml)
+[![License](https://img.shields.io/crates/l/mdstitch.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/MSRV-1.95-blue.svg)](https://github.com/df49b9cd/mdstitch)
+[![Downloads](https://img.shields.io/crates/d/mdstitch.svg)](https://crates.io/crates/mdstitch)
+
 Streaming markdown preprocessor — auto-completes incomplete syntax during
 token-by-token streaming.
+
+For how the pipeline is structured and why, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## What it does
 
@@ -65,15 +74,15 @@ currency.
 
 | Option                 | Priority | Completes / handles                                                              | Default |
 | ---------------------- | -------- | -------------------------------------------------------------------------------- | ------- |
-| `single_tilde`         | 0        | Escapes a lone `~` between word characters                                       | on      |
 | `comparison_operators` | 5        | Escapes `>` at the start of list items so it doesn't parse as a blockquote       | on      |
 | `html_tags`            | 10       | Strips an incomplete trailing HTML tag                                           | on      |
 | `setext_headings`      | 15       | Prevents a trailing `===` / `---` line from being misread as a setext underline  | on      |
 | `links` / `images`     | 20       | `[text](url` → `[text](stitch:incomplete-link)` (see `LinkMode`)                 | on      |
+| `inline_code`          | 25       | `` `x `` → `` `x` `` (closes before emphasis so spans stay intact)               | on      |
+| `single_tilde`         | 26       | Escapes a lone `~` between word characters                                       | on      |
 | `bold_italic`          | 30       | `***x` → `***x***`                                                               | on      |
 | `bold`                 | 35       | `**x` → `**x**`                                                                  | on      |
 | `italic`               | 40–42    | `__x` / `*x` / `_x` → closed                                                     | on      |
-| `inline_code`          | 50       | `` `x `` → `` `x` ``                                                             | on      |
 | `strikethrough`        | 60       | `~~x` → `~~x~~`                                                                  | on      |
 | `katex`                | 70       | `$$eq` → `$$eq$$`                                                                | on      |
 | `inline_katex`         | 75       | `$eq` → `$eq$`                                                                   | **off** |
@@ -138,6 +147,10 @@ pipeline:
 - `has_incomplete_code_fence(&str) -> bool` — walks lines per CommonMark §4.5
   to detect an unclosed fence. Used by `IncrementalMarkdownParser` to gate
   code-block styling mid-stream.
+- `open_fence(&str) -> Option<(char, usize)>` — the opening fence's character
+  and run length when the text ends inside a fence, so repair code can append
+  a matching closer (`` ``` `` is not closed by ``` ` ``). Returns `None`
+  when no fence is open.
 - `has_table(&str) -> bool` — detects a GFM table delimiter row (`| --- |`).
 - `detect_text_direction(&str) -> TextDirection` — first-strong-character
   Unicode heuristic, returns `Ltr` or `Rtl`. Skips common markdown syntax
@@ -174,23 +187,22 @@ src/
 │
 │   # Secondary (not part of the stitch() pipeline):
 ├── detect_direction.rs       # RTL/LTR detection
-├── incomplete_code.rs        # has_incomplete_code_fence, has_table
-├── preprocess.rs             # custom / literal HTML tag handling
+├── incomplete_code.rs         # has_incomplete_code_fence, open_fence, has_table
+├── preprocess.rs              # custom / literal HTML tag handling
 │
-└── tests.rs                  # unit tests + proptest fuzzers
+└── tests/                     # unit tests + proptest fuzzers, one file per concern
 ```
 
 ## Testing
 
 ```bash
-cargo nextest run -p mdstitch
+cargo test -p mdstitch
+cargo clippy --all-targets -- -D warnings   # same as CI
+cargo bench -p mdstitch                     # criterion; groups: stitch_incremental, stitch_plain_incremental
 ```
 
-Use `cargo nextest`, not `cargo test` — the workspace `.config/nextest.toml`
-tunes parallelism and retries.
-
-The test suite exercises every built-in handler in isolation plus a
-`proptest!` block that fuzzes:
+The test suite (in `src/tests/`, one file per concern) exercises every
+built-in handler in isolation plus a `proptest!` block that fuzzes:
 
 - Arbitrary UTF-8 never panics.
 - Every streaming prefix of arbitrary UTF-8 never panics (each cut on a char
