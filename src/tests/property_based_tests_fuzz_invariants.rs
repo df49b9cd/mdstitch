@@ -470,21 +470,31 @@ proptest! {
     }
 
     // Idempotency stress test across every option combination. Collapsed from
-    // four near-duplicates; the direct regression test above is the canonical
-    // tripwire.
+    // four near-duplicates; the direct regression tests below
+    // (`idempotency_regression_*` / `idempotency_seeds_pipeline`) pin the
+    // individual failure families discovered by this sweep.
     //
-    // IGNORED in the vocoder vendored copy: this randomized test keeps
-    // discovering upstream idempotency bugs. Three were fixed here (see
-    // regression_idempotent_* tests: unterminated HTML tag swallowing an
-    // appended underscore closer; single-tilde vs link-unwrap ordering;
-    // inline-code vs emphasis ordering). One remains unfixed upstream:
-    //   s = "`$\n$*", italic + inline_katex (katex/italic interaction)
-    // All seeds are preserved in proptest-regressions/tests.txt for the
-    // upstream crate (tahoe-gpui). Run with --ignored to hunt more.
+    // Remaining failing families (as of fdc2b2a; run with --ignored):
+    //   1. `"*A$$\n"`, italic + block katex — italic runs before katex and
+    //      appends `*` after the `$$` that katex will close, so the appended
+    //      closer lands inside the complete math span on the next pass and
+    //      the count stays odd.
+    //   2. `"*>\*"`, italic — a trailing backslash escapes the only counted
+    //      `*`; italic appends again, the run grows, and the count is
+    //      perpetually odd (the escaped `*` is invisible to the count on
+    //      downstream passes).
+    //   3. `"`$\n$*"`, italic + inline_katex — the math range pairing used to
+    //      disagree with the katex counter when a `$` sat inside an inline
+    //      code span, mis-pairing the trailing pair (fixed in fence.rs /
+    //      ranges.rs by masking code in math scans).
     //
-    // TODO(upstream-link): file/track the remaining seed at
-    // https://github.com/df49b9cd/mdstitch/issues so the #[ignore] is
-    // externally visible rather than silently gated here.
+    // These three represent a cross-handler ordering tension that priority
+    // reordering alone cannot resolve (each fix breaks the currently-green
+    // regression suite for the other family). Track at
+    // https://github.com/df49b9cd/mdstitch/issues. All saved seeds live at
+    // proptest-regressions/tests/property_based_tests_fuzz_invariants.txt —
+    // proptest's SourceParallel mode mirrors the source path, so seeds here
+    // were dead from the `src/tests/` split until now.
     #[ignore]
     #[test]
     fn fuzz_idempotent_all_option_combinations(
