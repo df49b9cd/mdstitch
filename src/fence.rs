@@ -326,6 +326,49 @@ where
     }
 }
 
+/// Byte ranges covering the interiors of all code regions (fenced code
+/// blocks and inline code spans), in scan order.
+///
+/// Boundary convention (shared with `ranges::CodeBlockRanges` and
+/// `utils::is_inside_code_block`): an interior starts just past the opening
+/// delimiter and ends just past the closing delimiter — or at `len + 1`
+/// when the region is unterminated at EOF — so "position is inside code"
+/// is exactly "position falls within some range".
+///
+/// `ranges::CodeBlockRanges` and the code-masking passes of the math
+/// scanners (`ranges::compute_math_ranges_impl`,
+/// `utils::is_within_math_block`) all build on this helper so every
+/// consumer agrees on where code lives without re-implementing the state
+/// machine.
+pub(crate) fn code_interior_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
+    let len = text.len();
+    let mut ranges = Vec::new();
+    scan_code_regions(text, |region| {
+        let (start, end) = match region {
+            CodeRegion::Fence(f) => (
+                f.open_run_start + 1,
+                if f.closed {
+                    f.close_run_start + 1
+                } else {
+                    len + 1
+                },
+            ),
+            CodeRegion::Inline(s) => (
+                s.open_pos + 1,
+                match s.terminator {
+                    InlineTerminator::Closed(p) | InlineTerminator::Newline(p) => p + 1,
+                    InlineTerminator::Eof => len + 1,
+                },
+            ),
+        };
+        if start <= end {
+            ranges.push(start..end);
+        }
+        ControlFlow::Continue(())
+    });
+    ranges
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

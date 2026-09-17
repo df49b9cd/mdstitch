@@ -6,6 +6,30 @@ All notable changes to `mdstitch` will be documented here. The format is based o
 
 ## [Unreleased]
 
+### Fixed
+
+- Math-range construction (`CodeBlockRanges::compute_math_ranges_impl` and
+  `utils::is_within_math_block`) now treats `$` inside fenced code blocks and
+  inline code spans as literal text, matching the katex handlers' counters.
+  Previously a code-hidden `$` could mis-pair the surrounding dollars so that
+  neither `is_within_math` nor `is_within_complete_math` ever reported the
+  real math span — emphasis handlers then re-appended closers on every pass
+  (`stitch "`$\n$*"` was not idempotent).
+- Proptest regression seeds were not being replayed: the persistence file
+  lived at `proptest-regressions/tests.txt` from when the test suite was a
+  single `src/tests.rs`; after the `src/tests/` split, proptest's
+  `SourceParallel` mode looks for a file mirroring the source path. Moved to
+  `proptest-regressions/tests/property_based_tests_fuzz_invariants.txt`. Run
+  the full sweep with `cargo test -- --ignored`.
+
+### Changed
+
+- Internal: `ranges::compute_code_ranges` is now a thin adapter over the new
+  `fence::code_interior_ranges` helper, which also backs both math scanners —
+  code-interior boundary math exists in one place.
+
+No public API changes.
+
 ## [0.1.2]
 
 ### Changed
