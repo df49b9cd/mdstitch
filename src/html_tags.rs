@@ -14,34 +14,46 @@ fn handle(text: &str) -> Cow<'_, str> {
 pub(crate) fn handle_with_ranges<'a>(text: &'a str, ranges: &CodeBlockRanges) -> Cow<'a, str> {
     let bytes = text.as_bytes();
 
-    // Scan backward for `<` that starts an incomplete tag.
+    // Scan backward for `<` that starts an incomplete tag, refusing to strip
+    // if doing so would expose an *earlier* incomplete tag at the new end
+    // (that one would be stripped on the next pass, so stripping would not
+    // be self-stable: `<A <A` → strip → `<A` → strip again).
+    //
+    // `strip_at` records the first strippable `<` we find. After that we
+    // keep walking leftward through the remaining prefix; any other `<` that
+    // itself would be treated as a strip candidate (same checks, but applied
+    // to the *remainder of the whole text*) means stripping `strip_at` would
+    // expose an incomplete tag → bail out with Borrowed.
+    let mut strip_at: Option<usize> = None;
     let mut i = bytes.len();
     while i > 0 {
         i -= 1;
-        if bytes[i] == b'>' {
-            return Cow::Borrowed(text);
-        }
-        if bytes[i] == b'<' {
-            // Inline `a<b`-style text has `<` adjacent to a word char; skip those
-            // rather than treat as a tag start.
-            if i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_') {
-                return Cow::Borrowed(text);
+        match bytes[i] {
+            b'>' => return Cow::Borrowed(text),
+            b'<' => {
+                let excludes_via_flank =
+                    i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
+                let excludes_via_shape = !is_plausible_tag_remainder(&bytes[i + 1..]);
+                let excludes_via_code = ranges.is_inside_code(i);
+                if excludes_via_flank || excludes_via_shape || excludes_via_code {
+                    return Cow::Borrowed(text);
+                }
+                if strip_at.is_some() {
+                    // An earlier `<` forms a strippable tag on its own —
+                    // stripping the trailing one would expose it.
+                    return Cow::Borrowed(text);
+                }
+                strip_at = Some(i);
             }
-            if !is_plausible_tag_remainder(&bytes[i + 1..]) {
-                return Cow::Borrowed(text);
-            }
-            if ranges.is_inside_code(i) {
-                return Cow::Borrowed(text);
-            }
-            let trimmed = text[..i].trim_end();
-            return Cow::Owned(trimmed.to_owned());
-        }
-        if bytes[i] == b'\n' {
-            return Cow::Borrowed(text);
+            b'\n' => return Cow::Borrowed(text),
+            _ => {}
         }
     }
 
-    Cow::Borrowed(text)
+    match strip_at {
+        Some(i) => Cow::Owned(text[..i].trim_end().to_owned()),
+        None => Cow::Borrowed(text),
+    }
 }
 
 #[cfg(test)]

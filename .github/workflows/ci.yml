@@ -42,6 +42,29 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  seeds:
+    # Regression-corpus replay at reduced case count. The idempotency sweep
+    # is a normal (non-ignored) test now, so `cargo test` in the `verify` job
+    # already runs it at the module default; this job re-runs it explicitly
+    # with a larger case budget so the persisted seeds under
+    # proptest-regressions/tests/ serve as a real gate: proptest replays
+    # every saved seed before generating novel cases.
+    name: proptest seed replay
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust (pinned via rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Replay idempotency seeds
+        run: cargo test --lib --release -- fuzz_idempotent_all_option_combinations
+        env:
+          PROPTEST_CASES: "2000"
+
   bench-smoke:
     # Cheap guard that benches still compile and run; not a perf gate.
     name: benches compile

@@ -97,6 +97,25 @@ priority sort and a hardcoded fast path). They drifted once on the
 is baked into the design: `BUILTIN_ORDER` is the single source of truth,
 and the priority-sort test pins it.
 
+### Idempotency
+
+`stitch(stitch(x)) == stitch(x)` does **not** fall out of the priority
+order. Two mechanisms enforce it:
+
+1. **Self-stable appends.** Every appending handler refuses an append whose
+   byte a later handler's region would hide — the content-keyed gates in
+   `emphasis` (`gate_block_math_swallow` / `gate_inline_math_swallow` /
+   `gate_inline_code_swallow`), which consult `CodeBlockRanges`. The same
+   rule covers insertion points: `insert_closing_underscore` returns `None`
+   when the `_` would land beside an existing `_` or an unescaped `\`,
+   because `should_skip_underscore` skips exactly those positions, making
+   the new byte invisible to the counter from the moment it is written.
+2. **Bounded fixpoint.** `run_pipeline` re-runs the builtin stages until two
+   consecutive passes agree (≤ 8 iterations, cycle-detected). If it never
+   converges, the shortest candidate that verifies as a fixed point is
+   returned, so the caller's guarantee still holds. Custom handlers skip the
+   loop — their idempotency is per-handler.
+
 ### 4. Stage mechanics
 
 Each stage threads a `Cow<str>` through [`apply_with`](src/lib.rs), which

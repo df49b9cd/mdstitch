@@ -418,6 +418,133 @@ fn idempotency_seeds_pipeline() {
                 o.link_mode = LinkMode::TextOnly;
             }),
         ),
+        // Regression 0150: `italic_double_underscore` sees `_0__` as an
+        // unclosed `__` pair, `handle_half_complete_underscore` treats `_0__`
+        // 's final `_` as half-closer and appends `_` — the run grows forever
+        // because `_` at 2 stays `prev == '_'` and `find_first_single_*` skips
+        // it (`_0__` → `_0___` → `_0____` → ...).
+        (
+            "_0__",
+            only(|o| {
+                o.italic = true;
+            }),
+        ),
+        // Regression 0151: italic_asterisk on `"*>\*"` — a `\*` hides the
+        // whole trailing `*` run from the counter (members after the first
+        // get `prev == '*'` skipped), so a single odd-count `*` at index 0
+        // keeps the parity odd and italic re-appends on every pass
+        // (`*>\*` → `*>\**` → `*>\***` → *).
+        (
+            "*>\\*",
+            only(|o| {
+                o.italic = true;
+            }),
+        ),
+        // Regression 0152: `"*A$$\n"`, italic + block katex. Italic appends
+        // `*` for the lone opener; katex_block later appends `\n$$`,
+        // wrapping the appended closer inside `$$…$$` where italic's counter
+        // can't see it → re-append loop on pass 2.
+        (
+            "*A$$\n",
+            only(|o| {
+                o.italic = true;
+                o.katex = true;
+            }),
+        ),
+        // Regression 0153: `"_$,` variant — italic appends `_` after the
+        // trailing `$`; inline_katex then appends `$`; pass 2 sees `_$_`
+        // balanced katex-wise but odd italic-wise vs the first pass.
+        (
+            "_$,",
+            only(|o| {
+                o.italic = true;
+                o.inline_katex = true;
+            }),
+        ),
+        // Regression 0154: like 0153 but the `$$` is *closed*, so the gate
+        // cannot key on "unclosed math" — italic's `*` would land between
+        // the closer `$$` and inline_katex's appended `$`.
+        (
+            "$$*$",
+            only(|o| {
+                o.italic = true;
+                o.inline_katex = true;
+            }),
+        ),
+        // Regression 0155: inline_code's backtick-append and inline_katex's
+        // `$`-append cross-fire — each doesn't check the other's open state.
+        (
+            "$`,",
+            only(|o| {
+                o.inline_code = true;
+                o.inline_katex = true;
+            }),
+        ),
+        // Regression 0156: html_tags stripped the trailing `<A` of `<A <A`,
+        // exposing an *earlier* incomplete tag at the new end — the outer
+        // strip wasn't self-stable. Fix: html_tags walks the prefix alive and
+        // refuses to strip when a strippable earlier `<` sits behind the one
+        // at the end.
+        (
+            "<A <A",
+            only(|o| {
+                o.html_tags = true;
+            }),
+        ),
+        // Regression 0157: `$``$$**`, italic+inline_katex: bold appends
+        // `**`, inline_katex appends `$`, the appended `**` lands inside
+        // what the next pass reads as `$$…$$` complete math.
+        (
+            "$``$$**",
+            only(|o| {
+                o.bold = true;
+                o.inline_katex = true;
+            }),
+        ),
+        // Regression 0158: `$$$A$*$a`, italic+inline_katex: italic appends
+        // `*`, inline_katex appends `$`, the next pass re-reads the trailing
+        // `$` as part of a `$$` pair, and the `*` lands inside math.
+        (
+            "$$$A$*$a",
+            only(|o| {
+                o.italic = true;
+                o.inline_katex = true;
+            }),
+        ),
+        // Regression 0159: `$*A**\n`A / `$*\rA**\r*\n` — inline_katex's `$`
+        // closes past the bold-appended `**`, and on pass 2 italic_asterisk
+        // re-pairs the visible opener with the fresh `**` and appends.
+        (
+            "$*A**`\n`A",
+            only(|o| {
+                o.bold = true;
+                o.italic = true;
+                o.inline_katex = true;
+            }),
+        ),
+        // Regression 0160: `` ``_*>__``, italic-only — the underscore
+        // completer re-inserted `_` next to an existing `_` run on every
+        // pass, and `should_skip_underscore` skips every `_` with a `_`
+        // neighbour, so the inserted byte was invisible from birth and the
+        // run grew without bound. Fix: `insert_closing_underscore` (and the
+        // `_`-insert-before-trailing-`*` helper) refuse an insertion point
+        // that sits directly after a `_` or an unescaped `\`.
+        (
+            "``_*>__",
+            only(|o| {
+                o.italic = true;
+            }),
+        ),
+        // Regression 0161: `$$_\`\n` — same invisible-insert shape as 0160
+        // but the insertion point follows an escaped-opener `\` rather than
+        // a `_`; both are covered by the same `insert_closing_underscore`
+        // guard.
+        (
+            "$$_\\\n",
+            only(|o| {
+                o.italic = true;
+            }),
+        ),
     ];
 
     for (input, opts) in seeds {
@@ -446,7 +573,12 @@ fn idempotency_trailing_backslash_combos() {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
+    // `cases` is deliberately NOT pinned here: an explicit literal would
+    // override `PROPTEST_CASES`, silently capping every sweep at the
+    // hardcoded count (a 50k invocation would quietly run 128 cases).
+    // With it left open, `ProptestConfig::default()` applies — 256 —
+    // and `PROPTEST_CASES=N` scales real sweeps as advertised.
+    #![proptest_config(ProptestConfig::default())]
 
     #[test]
     fn fuzz_never_panics_on_arbitrary_utf8(chars in prop::collection::vec(any::<char>(), 0..256)) {
@@ -470,22 +602,27 @@ proptest! {
     }
 
     // Idempotency stress test across every option combination. Collapsed from
-    // four near-duplicates; the direct regression test above is the canonical
-    // tripwire.
+    // four near-duplicates; the direct regression tests above
+    // (`idempotency_regression_*` / `idempotency_seeds_pipeline`) pin the
+    // individual failure families this sweep has produced.
     //
-    // IGNORED in the vocoder vendored copy: this randomized test keeps
-    // discovering upstream idempotency bugs. Three were fixed here (see
-    // regression_idempotent_* tests: unterminated HTML tag swallowing an
-    // appended underscore closer; single-tilde vs link-unwrap ordering;
-    // inline-code vs emphasis ordering). One remains unfixed upstream:
-    //   s = "`$\n$*", italic + inline_katex (katex/italic interaction)
-    // All seeds are preserved in proptest-regressions/tests.txt for the
-    // upstream crate (tahoe-gpui). Run with --ignored to hunt more.
+    // Fixed-point law: stitch(stitch(x)) == stitch(x). It holds because
     //
-    // TODO(upstream-link): file/track the remaining seed at
-    // https://github.com/df49b9cd/mdstitch/issues so the #[ignore] is
-    // externally visible rather than silently gated here.
-    #[ignore]
+    //  1. every appending handler is self-stable — it refuses an append that
+    //     a later handler's region would swallow (the `gate_*_swallow`
+    //     helpers in emphasis.rs, the html_tags early-exposure check), and
+    //  2. `run_pipeline` closes the residual cross-handler cases with a
+    //     bounded fixpoint loop (≤ 8 passes, cycle-detected).
+    //
+    // The sweep runs at the module-default case count (256) in `cargo test`;
+    // the full-strength run is on demand:
+    //   PROPTEST_CASES=50000 PROPTEST_MAX_SHRINK_ITERS=8000 \
+    //     cargo test --lib --release -- fuzz_idempotent_all_option_combinations
+    //
+    // Persisted seeds live at
+    // proptest-regressions/tests/property_based_tests_fuzz_invariants.txt and
+    // replay automatically before novel cases; CI replays them on every push
+    // via the `seeds` job in .github/workflows/ci.yml.
     #[test]
     fn fuzz_idempotent_all_option_combinations(
         s in markdown_soup(),

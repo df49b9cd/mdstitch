@@ -118,39 +118,14 @@ impl CodeBlockRanges {
 
     /// Compute code ranges (fenced code blocks + inline code).
     ///
-    /// Thin adapter over `scan_code_regions` — the canonical fence/inline state
-    /// machine lives in `fence.rs`. Boundary conventions (`start + 1` for the
-    /// first delimiter byte, `end + 1` for the first byte of the closer,
-    /// `len + 1` for unterminated regions) keep `is_inside_code(pos)` in
-    /// agreement with `utils::is_inside_code_block(text, pos)` for every
-    /// `pos` in `0..=len`.
+    /// Thin adapter over `fence::code_interior_ranges` — the canonical
+    /// fence/inline state machine lives in `fence.rs`. Boundary conventions
+    /// (`start + 1` for the first delimiter byte, `end + 1` for the first
+    /// byte of the closer, `len + 1` for unterminated regions) keep
+    /// `is_inside_code(pos)` in agreement with `utils::is_inside_code_block(text, pos)`
+    /// for every `pos` in `0..=len`.
     fn compute_code_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
-        let len = text.len();
-        let mut ranges = Vec::new();
-        scan_code_regions(text, |region| {
-            let (start, end) = match region {
-                CodeRegion::Fence(f) => {
-                    let end = if f.closed {
-                        f.close_run_start + 1
-                    } else {
-                        len + 1
-                    };
-                    (f.open_run_start + 1, end)
-                }
-                CodeRegion::Inline(s) => {
-                    let end = match s.terminator {
-                        InlineTerminator::Closed(p) | InlineTerminator::Newline(p) => p + 1,
-                        InlineTerminator::Eof => len + 1,
-                    };
-                    (s.open_pos + 1, end)
-                }
-            };
-            if start <= end {
-                ranges.push(start..end);
-            }
-            ControlFlow::Continue(())
-        });
-        ranges
+        super::fence::code_interior_ranges(text)
     }
 
     /// Compute complete inline code ranges.
@@ -209,6 +184,17 @@ impl CodeBlockRanges {
     ) -> Vec<std::ops::Range<usize>> {
         let bytes = text.as_bytes();
         let len = bytes.len();
+        // Dollars inside code (fenced blocks / inline spans) are literal, not
+        // math delimiters — the katex handlers' counters (which mask code via
+        // `ranges.is_inside_code`) rely on this scanner agreeing with them.
+        // Without masking, a code-hidden `$` mis-pairs the real dollars
+        // around it: on `` `$\n$*$ `` the `$` inside the backtick span
+        // "opens" math, pairs with the mid-text `$`, and the trailing pair
+        // never forms — the `*` between the real dollars escapes
+        // `is_within_complete_math`, so emphasis re-completes it on every
+        // pass (proptest regression `` "`$\n$*" ``, italic + inline_katex).
+        let code = super::fence::code_interior_ranges(text);
+        let in_code = |i: usize| Self::position_in_ranges(&code, i);
         let mut ranges = Vec::new();
         let mut in_inline_math = false;
         let mut in_block_math = false;
@@ -222,7 +208,7 @@ impl CodeBlockRanges {
                 continue;
             }
 
-            if bytes[i] == b'$' {
+            if bytes[i] == b'$' && !in_code(i) {
                 // Check for block math ($$).
                 if i + 1 < len && bytes[i + 1] == b'$' {
                     if in_block_math {

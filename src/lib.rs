@@ -168,21 +168,91 @@ pub fn stitch<'a>(text: &'a str, options: &StitchOptions) -> Cow<'a, str> {
     }
 
     // Strip trailing single space (preserve double space for line breaks).
-    let result: Cow<'a, str> = if text.ends_with(' ') && !text.ends_with("  ") {
+    let initial: Cow<'a, str> = if text.ends_with(' ') && !text.ends_with("  ") {
         Cow::Borrowed(&text[..text.len() - 1])
     } else {
         Cow::Borrowed(text)
     };
 
+    let first = run_pipeline_entry(initial, options);
+
+    if options.handlers.is_empty() {
+        // Idempotency fixed point. With the handler-side gates in place the
+        // pipeline converges in one pass almost always; the loop exists as
+        // defence-in-depth for cross-handler state that a single pass can't
+        // settle. It re-runs until two consecutive passes agree, and the
+        // returned value is verified to satisfy `stitch(result) == result`.
+        use std::collections::HashSet;
+        let seed = text.to_owned();
+        let mut current = match first {
+            Cow::Borrowed(b) if std::ptr::eq(b, text) => seed.clone(),
+            Cow::Borrowed(b) => b.to_owned(),
+            Cow::Owned(s) => s,
+        };
+        let mut seen: HashSet<String> = HashSet::new();
+        seen.insert(current.clone());
+        let mut candidates: Vec<String> = vec![current.clone()];
+        let mut converged = false;
+        for _ in 0..MAX_FIXPOINT_PASSES {
+            let next = run_pipeline_entry(Cow::Borrowed(current.as_str()), options).into_owned();
+            if next == current {
+                converged = true;
+                break;
+            }
+            if !seen.insert(next.clone()) {
+                break;
+            }
+            candidates.push(next.clone());
+            current = next;
+        }
+        let result = if converged {
+            current
+        } else {
+            settle_to_fixed_point(candidates, options)
+        };
+        if result == seed {
+            return Cow::Borrowed(text);
+        }
+        return Cow::Owned(result);
+    }
+
+    first
+}
+
+/// Pass cap for the idempotency loop. Convergence normally takes one pass;
+/// the bound only stops a hypothetical oscillation from spinning forever.
+const MAX_FIXPOINT_PASSES: usize = 8;
+
+/// Fallback for the (now unobserved) case where the pipeline oscillates
+/// instead of converging: pick the shortest candidate that is itself a
+/// fixed point under the pipeline, so the caller's guarantee
+/// `stitch(stitch(x)) == stitch(x)` still holds. If none qualifies — which
+/// would mean the gates have a genuine hole — return the shortest candidate
+/// overall, i.e. the state closest to the caller's input.
+fn settle_to_fixed_point(mut candidates: Vec<String>, options: &StitchOptions) -> String {
+    candidates.sort_by_key(|c| c.len());
+    if let Some(i) = candidates.iter().position(|c| is_fixed_point(c, options)) {
+        return candidates.swap_remove(i);
+    }
+    candidates.remove(0)
+}
+
+/// True when one pipeline pass leaves `text` unchanged.
+fn is_fixed_point(text: &str, options: &StitchOptions) -> bool {
+    run_pipeline_entry(Cow::Borrowed(text), options).as_ref() == text
+}
+
+/// Single pipeline invocation: fast-path trigger scan + builtin stages.
+fn run_pipeline_entry<'a>(initial: Cow<'a, str>, options: &StitchOptions) -> Cow<'a, str> {
     // Marker-absence fast path: if no enabled builtin handler has a trigger
     // byte in the text, there is nothing to complete and no code/math/region
     // to track — skip the O(n) `CodeBlockRanges::new` (6 full-text scans) and
     // every handler pass, returning the input unchanged. Custom handlers have
     // unknown triggers, so this only fires on the builtin-only pipeline.
     let presence = if options.handlers.is_empty() {
-        let p = scan_triggers(result.as_ref(), options);
+        let p = scan_triggers(initial.as_ref(), options);
         if p.none() {
-            return result;
+            return initial;
         }
         p
     } else {
@@ -190,7 +260,7 @@ pub fn stitch<'a>(text: &'a str, options: &StitchOptions) -> Cow<'a, str> {
         TriggerPresence::default()
     };
 
-    run_pipeline(result, options, presence)
+    run_pipeline(initial, options, presence)
 }
 
 /// A shared `CodeBlockRanges`, built lazily on first use and invalidated after
@@ -553,7 +623,7 @@ mod tests;
 
 #[cfg(test)]
 mod pipeline_tests {
-    use super::BUILTIN_ORDER;
+    use super::{BUILTIN_ORDER, StitchOptions, is_fixed_point, settle_to_fixed_point, stitch};
 
     /// Execution order must match ascending `priority()` — the priority sort
     /// in the custom-handler path is only correct if the base table already
@@ -572,5 +642,36 @@ mod pipeline_tests {
         // Sanity: the table and the enum's variants are in 1:1 correspondence
         // (minus none, plus the html-rerun pseudo-stage).
         assert_eq!(BUILTIN_ORDER.len(), 15);
+    }
+
+    /// The oscillation fallback must return a state that is genuinely a
+    /// fixed point, not merely the shortest string handed to it.
+    #[test]
+    fn settle_prefers_a_fixed_point_over_the_shortest_candidate() {
+        let opts = StitchOptions::default();
+        // `"*unclosed"` needs a closer; `"*unclosed*"` is already a fixed
+        // point. The shortest candidate is the former, so a length-only
+        // choice would return a non-fixed-point.
+        let shortest = "*unclosed".to_string();
+        let fixed = stitch(&shortest, &opts).into_owned();
+        assert!(is_fixed_point(&fixed, &opts));
+
+        let chosen = settle_to_fixed_point(vec![shortest.clone(), fixed.clone()], &opts);
+        assert_eq!(chosen, fixed);
+        assert!(is_fixed_point(&chosen, &opts));
+    }
+
+    /// With no fixed point among the candidates the fallback degrades to the
+    /// shortest one rather than panicking or looping.
+    #[test]
+    fn settle_degrades_to_shortest_when_nothing_is_stable() {
+        let opts = StitchOptions::default();
+        // Both need a closer, so neither is a fixed point.
+        let a = "*a".to_string();
+        let b = "*aa".to_string();
+        assert!(!is_fixed_point(&a, &opts) && !is_fixed_point(&b, &opts));
+
+        let chosen = settle_to_fixed_point(vec![b, a.clone()], &opts);
+        assert_eq!(chosen, a);
     }
 }

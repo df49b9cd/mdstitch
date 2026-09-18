@@ -207,10 +207,13 @@ built-in handler in isolation plus a `proptest!` block that fuzzes:
 - Arbitrary UTF-8 never panics.
 - Every streaming prefix of arbitrary UTF-8 never panics (each cut on a char
   boundary is `stitch`'d).
-- Idempotency across every option combination: `stitch(stitch(x)) == stitch(x)`.
+- Idempotency across every option combination: `stitch(stitch(x)) == stitch(x)`
+  (proptest: `fuzz_idempotent_all_option_combinations`, run it with
+  `cargo test -- --ignored`).
 - Custom-handler order matches the priority sort.
 
-Proptest regressions are committed under `proptest-regressions/tests.txt`.
+Proptest regressions are committed under `proptest-regressions/` (one file per
+test source file, mirroring `src/tests/`).
 
 ## License
 

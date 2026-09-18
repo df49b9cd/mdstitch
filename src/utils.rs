@@ -220,11 +220,18 @@ pub fn count_single_backticks(text: &str) -> usize {
 }
 
 /// Returns `true` if `position` is inside a math block (`$` or `$$`).
+///
+/// Dollars inside code (fenced blocks or inline code spans) are literal
+/// text, not math delimiters — this must agree with
+/// `ranges::compute_math_ranges_impl`, which masks code interiors the same
+/// way (cross-validated in `ranges::tests`).
 pub fn is_within_math_block(text: &str, position: usize) -> bool {
     let bytes = text.as_bytes();
     let mut in_inline_math = false;
     let mut in_block_math = false;
     let mut i = 0;
+    let code = super::fence::code_interior_ranges(text);
+    let mut code_idx = 0usize;
 
     while i < bytes.len() && i < position {
         // Skip escaped dollar signs.
@@ -232,7 +239,13 @@ pub fn is_within_math_block(text: &str, position: usize) -> bool {
             i += 2;
             continue;
         }
-        if bytes[i] == b'$' {
+        // Code interiors are sorted and non-overlapping; `i` only moves
+        // forward, so a cursor walks them in O(n) total.
+        while code_idx < code.len() && code[code_idx].end <= i {
+            code_idx += 1;
+        }
+        let in_code = code_idx < code.len() && code[code_idx].contains(&i);
+        if bytes[i] == b'$' && !in_code {
             // Check for block math ($$).
             if i + 1 < bytes.len() && bytes[i + 1] == b'$' {
                 in_block_math = !in_block_math;

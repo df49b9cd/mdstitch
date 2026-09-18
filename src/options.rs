@@ -32,12 +32,16 @@ pub trait StitchHandler: Send + Sync {
 ///
 /// Lower values run first. Custom handlers default to [`priority::DEFAULT`].
 ///
-/// Execution order matches ascending priority; the only intentional
-/// adjacency constraint is `INLINE_CODE` (25) before `SINGLE_TILDE` (26):
-/// inline_code closes an open backtick BEFORE single_tilde escapes `~`s, so
-/// emphasis handlers see closed code spans (idempotency; proptest regression
-/// `"*A***`a"`). Both still run after `LINKS` (TextOnly unwrapping can expose
-/// a lone `~` that must still be escaped — proptest regression `"a~[A"`).
+/// Priorities stay ascending; pipeline idempotency does **not** come from
+/// this order. The cross-handler "don't let a later region swallow an
+/// appended closer" invariant lives in content-keyed gates (see
+/// `emphasis::gate_*_swallow` and `html_tags::handle_with_ranges`), and a
+/// bounded fixpoint in `run_pipeline` closes the loop for combinations no
+/// gate can solve alone. Only one ordering choice remains load-bearing:
+/// `INLINE_CODE` (25) runs before `SINGLE_TILDE` (26) so emphasis handlers
+/// see closed code spans (proptest regression `"*A***`a"`); `LINKS` (20)
+/// pre-empts both so a TextOnly-unwrap can still feed a lone `~` to
+/// single_tilde (proptest regression `"a~[A"`).
 pub mod priority {
     /// Comparison operator escaping in lists.
     pub const COMPARISON_OPERATORS: i32 = 5;
