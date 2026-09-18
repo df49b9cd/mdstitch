@@ -100,15 +100,21 @@ and the priority-sort test pins it.
 ### Idempotency
 
 `stitch(stitch(x)) == stitch(x)` does **not** fall out of the priority
-order — a region a later handler creates (math / inline-code) can swallow
-a closer an earlier handler appended, so each appending handler refuses
-its append through content-keyed gates (`emphasis::gate_*_swallow`, the
-html_tags early-exposure check) that consult `CodeBlockRanges`. When a
-pair of handlers would still oscillate because neither can predict the
-region the other closes, a bounded fixpoint loop in `run_pipeline`
-re-runs the builtin stages until two consecutive passes agree (≤ 8
-iterations, cycle-detected, smallest fixed candidate wins). Custom
-handlers skip the loop — their idempotency is per-handler.
+order. Two mechanisms enforce it:
+
+1. **Self-stable appends.** Every appending handler refuses an append whose
+   byte a later handler's region would hide — the content-keyed gates in
+   `emphasis` (`gate_block_math_swallow` / `gate_inline_math_swallow` /
+   `gate_inline_code_swallow`), which consult `CodeBlockRanges`. The same
+   rule covers insertion points: `insert_closing_underscore` returns `None`
+   when the `_` would land beside an existing `_` or an unescaped `\`,
+   because `should_skip_underscore` skips exactly those positions, making
+   the new byte invisible to the counter from the moment it is written.
+2. **Bounded fixpoint.** `run_pipeline` re-runs the builtin stages until two
+   consecutive passes agree (≤ 8 iterations, cycle-detected). If it never
+   converges, the shortest candidate that verifies as a fixed point is
+   returned, so the caller's guarantee still holds. Custom handlers skip the
+   loop — their idempotency is per-handler.
 
 ### 4. Stage mechanics
 
