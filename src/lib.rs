@@ -168,21 +168,65 @@ pub fn stitch<'a>(text: &'a str, options: &StitchOptions) -> Cow<'a, str> {
     }
 
     // Strip trailing single space (preserve double space for line breaks).
-    let result: Cow<'a, str> = if text.ends_with(' ') && !text.ends_with("  ") {
+    let initial: Cow<'a, str> = if text.ends_with(' ') && !text.ends_with("  ") {
         Cow::Borrowed(&text[..text.len() - 1])
     } else {
         Cow::Borrowed(text)
     };
 
+    let first = run_pipeline_entry(initial, options);
+
+    if options.handlers.is_empty() {
+        // Idempotency fixed point: a second pass can expose a state one
+        // handler closed *over* a closer another appended (a region-swallow
+        // that no single pass can gate on its own — pass N decided under a
+        // different `CodeBlockRanges` than pass N+1 sees). Re-run the
+        // pipeline until two consecutive passes agree, with a hard cap so
+        // oscillation can't spin forever. `HashSet` short-circuits on an
+        // A→B→A cycle.
+        use std::collections::HashSet;
+        let mut seen: HashSet<String> = HashSet::new();
+        let seed = text.to_owned();
+        let mut current = match first {
+            Cow::Borrowed(b) if std::ptr::eq(b, text) => seed.clone(),
+            Cow::Borrowed(b) => b.to_owned(),
+            Cow::Owned(s) => s,
+        };
+        seen.insert(current.clone());
+        for _ in 0..8 {
+            let next = run_pipeline_entry(Cow::Borrowed(current.as_str()), options).into_owned();
+            if next == current {
+                break;
+            }
+            if !seen.insert(next.clone()) {
+                break;
+            }
+            current = next;
+        }
+        // Note: we seed `seen` with `text` so a pass that *exactly* returns
+        // the original input also counts as converged. The bounded loop is
+        // only exercised on the builtin pipeline; custom handlers own their
+        // own handler-level idempotency and can opt into the loop themselves.
+        if current == seed {
+            return Cow::Borrowed(text);
+        }
+        return Cow::Owned(current);
+    }
+
+    first
+}
+
+/// Single pipeline invocation: fast-path trigger scan + builtin stages.
+fn run_pipeline_entry<'a>(initial: Cow<'a, str>, options: &StitchOptions) -> Cow<'a, str> {
     // Marker-absence fast path: if no enabled builtin handler has a trigger
     // byte in the text, there is nothing to complete and no code/math/region
     // to track — skip the O(n) `CodeBlockRanges::new` (6 full-text scans) and
     // every handler pass, returning the input unchanged. Custom handlers have
     // unknown triggers, so this only fires on the builtin-only pipeline.
     let presence = if options.handlers.is_empty() {
-        let p = scan_triggers(result.as_ref(), options);
+        let p = scan_triggers(initial.as_ref(), options);
         if p.none() {
-            return result;
+            return initial;
         }
         p
     } else {
@@ -190,7 +234,7 @@ pub fn stitch<'a>(text: &'a str, options: &StitchOptions) -> Cow<'a, str> {
         TriggerPresence::default()
     };
 
-    run_pipeline(result, options, presence)
+    run_pipeline(initial, options, presence)
 }
 
 /// A shared `CodeBlockRanges`, built lazily on first use and invalidated after
