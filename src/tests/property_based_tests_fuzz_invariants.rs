@@ -522,13 +522,29 @@ fn idempotency_seeds_pipeline() {
                 o.inline_katex = true;
             }),
         ),
-        // Regression 0160: KNOWN-OPEN. `` ``_*>__``, italic-only — italic's
-        // counter reads an appended trailing `*` as an adequate closer while
-        // the code-region scan keeps marking it inside the pre-existing
-        // unclosed `` `` `` span, so each pass adds one more marker and the
-        // fixpoint oscillates. Tracked at
-        // https://github.com/df49b9cd/mdstitch/issues — needs a counter-level
-        // visibility fix, not another gate.
+        // Regression 0160: `` ``_*>__``, italic-only — the underscore
+        // completer re-inserted `_` next to an existing `_` run on every
+        // pass, and `should_skip_underscore` skips every `_` with a `_`
+        // neighbour, so the inserted byte was invisible from birth and the
+        // run grew without bound. Fix: `insert_closing_underscore` (and the
+        // `_`-insert-before-trailing-`*` helper) refuse an insertion point
+        // that sits directly after a `_` or an unescaped `\`.
+        (
+            "``_*>__",
+            only(|o| {
+                o.italic = true;
+            }),
+        ),
+        // Regression 0161: `$$_\`\n` — same invisible-insert shape as 0160
+        // but the insertion point follows an escaped-opener `\` rather than
+        // a `_`; both are covered by the same `insert_closing_underscore`
+        // guard.
+        (
+            "$$_\\\n",
+            only(|o| {
+                o.italic = true;
+            }),
+        ),
     ];
 
     for (input, opts) in seeds {
@@ -557,7 +573,12 @@ fn idempotency_trailing_backslash_combos() {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
+    // `cases` is deliberately NOT pinned here: an explicit literal would
+    // override `PROPTEST_CASES`, silently capping every sweep at the
+    // hardcoded count (a 50k invocation would quietly run 128 cases).
+    // With it left open, `ProptestConfig::default()` applies — 256 —
+    // and `PROPTEST_CASES=N` scales real sweeps as advertised.
+    #![proptest_config(ProptestConfig::default())]
 
     #[test]
     fn fuzz_never_panics_on_arbitrary_utf8(chars in prop::collection::vec(any::<char>(), 0..256)) {
@@ -581,29 +602,27 @@ proptest! {
     }
 
     // Idempotency stress test across every option combination. Collapsed from
-    // four near-duplicates; the direct regression tests below
+    // four near-duplicates; the direct regression tests above
     // (`idempotency_regression_*` / `idempotency_seeds_pipeline`) pin the
-    // individual failure families discovered by this sweep.
+    // individual failure families this sweep has produced.
     //
-    // Pipeline idempotency invariant: stitch(stitch(x)) == stitch(x). The
-    // gates in emphasis.rs/katex.rs/html_tags.rs now keep every appending
-    // handler self-stable (no append when a later handler's region would
-    // swallow the closer), and a bounded fixpoint loop in `run_pipeline`
-    // re-runs builtin stages until a fixed point is reached. The regression
-    // corpus under proptest-regressions/tests/ replays on every CI push via
-    // the `seeds` job in .github/workflows/ci.yml.
+    // Fixed-point law: stitch(stitch(x)) == stitch(x). It holds because
     //
-    // Known remaining family (tracked at
-    // https://github.com/df49b9cd/mdstitch/issues): `` ``_*>__`` with
-    // italic-only — italic's counter regards an appended trailing `*` as an
-    // adequate closer while the code-region scan keeps marking it inside
-    // the pre-existing unclosed `` `` `` span, so each pass adds one more
-    // marker and the loop oscillates. This needs a counter-level fix
-    // (visibility-aware counting), not a pass-order or gate tweak. Run the
-    // sweep with 50k cases:
+    //  1. every appending handler is self-stable — it refuses an append that
+    //     a later handler's region would swallow (the `gate_*_swallow`
+    //     helpers in emphasis.rs, the html_tags early-exposure check), and
+    //  2. `run_pipeline` closes the residual cross-handler cases with a
+    //     bounded fixpoint loop (≤ 8 passes, cycle-detected).
+    //
+    // The sweep runs at the module-default case count (256) in `cargo test`;
+    // the full-strength run is on demand:
     //   PROPTEST_CASES=50000 PROPTEST_MAX_SHRINK_ITERS=8000 \
-    //     cargo test --lib --release -- --ignored fuzz_idempotent_all_option_combinations
-    #[ignore]
+    //     cargo test --lib --release -- fuzz_idempotent_all_option_combinations
+    //
+    // Persisted seeds live at
+    // proptest-regressions/tests/property_based_tests_fuzz_invariants.txt and
+    // replay automatically before novel cases; CI replays them on every push
+    // via the `seeds` job in .github/workflows/ci.yml.
     #[test]
     fn fuzz_idempotent_all_option_combinations(
         s in markdown_soup(),

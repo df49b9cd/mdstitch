@@ -855,8 +855,10 @@ pub(crate) fn handle_italic_asterisk_with_ranges<'a>(
     // gets its `*` at the midpoint.
     if ranges.is_inside_code(text.len())
         && content_after.bytes().all(|b| {
-            matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b'*' | b'_' | b'`' | b'~' | b'\\' | b'$')
-                || !b.is_ascii()
+            matches!(
+                b,
+                b' ' | b'\t' | b'\n' | b'\r' | b'*' | b'_' | b'`' | b'~' | b'\\' | b'$'
+            ) || !b.is_ascii()
         })
     {
         return Cow::Borrowed(text);
@@ -971,8 +973,10 @@ pub(crate) fn handle_italic_underscore_with_ranges<'a>(
     // self-stability rule katex_block applies via `is_inside_code(len)`.
     if ranges.is_inside_code(text.len())
         && content_after.bytes().all(|b| {
-            matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b'*' | b'_' | b'`' | b'~' | b'\\' | b'$')
-                || !b.is_ascii()
+            matches!(
+                b,
+                b' ' | b'\t' | b'\n' | b'\r' | b'*' | b'_' | b'`' | b'~' | b'\\' | b'$'
+            ) || !b.is_ascii()
         })
     {
         return Cow::Borrowed(text);
@@ -1025,7 +1029,10 @@ pub(crate) fn handle_italic_underscore_with_ranges<'a>(
         if gate_refuses_append_from(text, first_idx, ranges) {
             return Cow::Borrowed(text);
         }
-        return insert_closing_underscore(text);
+        return match insert_closing_underscore(text) {
+            Some(result) => result,
+            None => Cow::Borrowed(text),
+        };
     }
 
     Cow::Borrowed(text)
@@ -1040,6 +1047,15 @@ fn handle_trailing_single_asterisk_for_underscore(text: &str) -> Option<String> 
     }
     let before = &text[..text.len() - 1];
     if !before.chars().next_back().is_some_and(is_word_char) {
+        return None;
+    }
+    // An inserted `_` that lands directly after another `_` is invisible to
+    // the counter from the moment it is written (`should_skip_underscore`
+    // skips any `_` with a `_` neighbour), so the count stays odd and each
+    // pass inserts again — unbounded growth (`` ``_*>__`` family).
+    // `_` counts as a word char, so this guard must come after the
+    // word-char check to stay reachable.
+    if before.ends_with('_') {
         return None;
     }
     let mut result = String::with_capacity(text.len() + 1);
@@ -1084,20 +1100,33 @@ fn handle_trailing_asterisks_for_underscore(
 }
 
 /// Inserts closing `_`, placing it before any trailing newlines.
-fn insert_closing_underscore(text: &str) -> Cow<'_, str> {
+///
+/// Returns `None` when the insertion point sits directly after a `_` or an
+/// unescaped `\`: such an underscore is invisible to the counter from the
+/// moment it is written (`should_skip_underscore` skips it via the
+/// neighbour rule / `is_escaped`), so the count stays odd and the next pass
+/// inserts again forever. (`_0__` and `$$_\`\n` families.)
+fn insert_closing_underscore(text: &str) -> Option<Cow<'_, str>> {
     let bytes = text.as_bytes();
     let mut end = bytes.len();
     while end > 0 && bytes[end - 1] == b'\n' {
         end -= 1;
+    }
+    if end > 0 {
+        let prev = bytes[end - 1];
+        let invisible_before = prev == b'_' || (prev == b'\\' && !is_escaped(bytes, end - 1));
+        if invisible_before {
+            return None;
+        }
     }
     if end < bytes.len() {
         let mut result = String::with_capacity(text.len() + 1);
         result.push_str(&text[..end]);
         result.push('_');
         result.push_str(&text[end..]);
-        Cow::Owned(result)
+        Some(Cow::Owned(result))
     } else {
-        cow_append(text, "_")
+        Some(cow_append(text, "_"))
     }
 }
 
@@ -1166,7 +1195,6 @@ fn is_asterisk_run(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-
 
     use super::{
         count_double_asterisks, count_double_underscores, count_single_asterisks,

@@ -8,10 +8,10 @@ All notable changes to `mdstitch` will be documented here. The format is based o
 
 ### Fixed
 
-- Idempotency violations under the idempotent fuzz sweep — five failure
-  families fixed via handler-side gates that refuse an append a later
-  handler would swallow into a region, plus a bounded fixpoint loop in
-  `run_pipeline` for the cross-handler shapes no single gate can settle:
+- Idempotency violations under the idempotent fuzz sweep — every failure
+  family fixed. Append-side gates refuse an append a later handler would
+  swallow into a region, and a bounded fixpoint loop in `run_pipeline`
+  settles the cross-handler shapes no single gate can:
   - `*A$$\n` (italic + block katex): italic's `*` landed inside the `$$…$$`
     the katex_block pass closed in the same sweep.
   - `_$,` / `$$*$` / `$$$A$*$a` (italic + inline_katex): italic's closer
@@ -22,22 +22,32 @@ All notable changes to `mdstitch` will be documented here. The format is based o
     earlier strippable one, so the strip was not self-stable.
   - "` $``,`" shape (inline_code + inline_katex): each handler's
     open-state check ignored the other's.
+  - ``` ``_*>__ ``` and `$$_\\\n` (italic): the underscore completer
+    re-inserted `_` beside an existing `_` run or an unescaped `\` on every
+    pass, and `should_skip_underscore` skips exactly those, so each insert
+    was invisible from birth and the run grew without bound.
 - Carries the earlier seed fixes for `_0__`, `*>\*`, `_\<A\t`, `a~[A`,
   `*A***a`, `[](`, `__$$*\r*\n`, `_\r$`, `$\`n\\`, and `` `$\n$* ``.
 
 ### Added
 
+- The idempotency sweep `fuzz_idempotent_all_option_combinations` is a
+  normal test now (was `#[ignore]`d) and passes 50 000 cases against the
+  full option matrix.
 - `stitch` runs a bounded fixpoint loop over the builtin pipeline until two
   consecutive passes agree (≤ 8 iterations, cycle-detected); custom
   handlers are excluded — their idempotency is per-handler.
-- CI `seeds` job replays the persisted proptest corpus at reduced case
-  count on every push, so the regression seeds keep exercising even when
-  the 50 k sweep stays local-only.
+- CI `seeds` job re-runs the sweep with a larger case budget on every push,
+  so the persisted corpus under `proptest-regressions/tests/` acts as a
+  gate.
 
 ### Changed
 
 - `options::priority` doc clarifies that priorities are still ascending;
   idempotency comes from the handler gates, not the ordering.
+- The fuzz module no longer pins an explicit `cases:` literal, which was
+  silently overriding `PROPTEST_CASES` and capping every sweep at 128
+  cases regardless of the requested count.
 
 ### Fixed
 

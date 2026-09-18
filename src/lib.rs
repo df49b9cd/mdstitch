@@ -177,24 +177,23 @@ pub fn stitch<'a>(text: &'a str, options: &StitchOptions) -> Cow<'a, str> {
     let first = run_pipeline_entry(initial, options);
 
     if options.handlers.is_empty() {
-        // Idempotency fixed point: re-run the builtin pipeline until two
-        // consecutive passes agree. When handlers oscillate cross-state
-        // (`` ``_*>__`` / `$*A**\n` families), fall back to the smallest
-        // snapshot reached that is itself a fixed point (verify by one
-        // extra stitch). The verify keeps the guarantee honest: any
-        // returned `result` satisfies `stitch(result) == result`.
+        // Idempotency fixed point. With the handler-side gates in place the
+        // pipeline converges in one pass almost always; the loop exists as
+        // defence-in-depth for cross-handler state that a single pass can't
+        // settle. It re-runs until two consecutive passes agree, and the
+        // returned value is verified to satisfy `stitch(result) == result`.
         use std::collections::HashSet;
-        let mut seen: HashSet<String> = HashSet::new();
         let seed = text.to_owned();
         let mut current = match first {
             Cow::Borrowed(b) if std::ptr::eq(b, text) => seed.clone(),
             Cow::Borrowed(b) => b.to_owned(),
             Cow::Owned(s) => s,
         };
+        let mut seen: HashSet<String> = HashSet::new();
         seen.insert(current.clone());
         let mut candidates: Vec<String> = vec![current.clone()];
         let mut converged = false;
-        for _ in 0..8 {
+        for _ in 0..MAX_FIXPOINT_PASSES {
             let next = run_pipeline_entry(Cow::Borrowed(current.as_str()), options).into_owned();
             if next == current {
                 converged = true;
@@ -209,39 +208,7 @@ pub fn stitch<'a>(text: &'a str, options: &StitchOptions) -> Cow<'a, str> {
         let result = if converged {
             current
         } else {
-            // No fixpoint in the window — handlers oscillate. Find a stable
-            // resting state by repeating the loop on each candidate until
-            // one returns itself. The smallest such snapshot is the
-            // canonical answer; without one, the smallest candidate overall
-            // is the closest the pipeline ever got.
-            candidates.sort_by_key(|c| c.len());
-            let mut found = None;
-            'outer: for c in &candidates {
-                // Nested loop over the same trajectory bounded by the same
-                // cap. On a true fixpoint this exits after one round.
-                let mut inner: HashSet<String> = HashSet::new();
-                let mut cur_c = c.clone();
-                for _ in 0..8 {
-                    let next =
-                        run_pipeline_entry(Cow::Borrowed(cur_c.as_str()), options).into_owned();
-                    if next == cur_c {
-                        cur_c = next;
-                        break;
-                    }
-                    cur_c = next;
-                    if !inner.insert(cur_c.clone()) {
-                        // Cross-iteration cycle: not a fixed point.
-                        break;
-                    }
-                }
-                // Converged to a self-stable state? Pick it.
-                let stable = run_pipeline_entry(Cow::Borrowed(cur_c.as_str()), options).into_owned();
-                if stable == cur_c {
-                    found = Some(cur_c);
-                    break 'outer;
-                }
-            }
-            found.unwrap_or_else(|| candidates[0].clone())
+            settle_to_fixed_point(candidates, options)
         };
         if result == seed {
             return Cow::Borrowed(text);
@@ -250,6 +217,29 @@ pub fn stitch<'a>(text: &'a str, options: &StitchOptions) -> Cow<'a, str> {
     }
 
     first
+}
+
+/// Pass cap for the idempotency loop. Convergence normally takes one pass;
+/// the bound only stops a hypothetical oscillation from spinning forever.
+const MAX_FIXPOINT_PASSES: usize = 8;
+
+/// Fallback for the (now unobserved) case where the pipeline oscillates
+/// instead of converging: pick the shortest candidate that is itself a
+/// fixed point under the pipeline, so the caller's guarantee
+/// `stitch(stitch(x)) == stitch(x)` still holds. If none qualifies — which
+/// would mean the gates have a genuine hole — return the shortest candidate
+/// overall, i.e. the state closest to the caller's input.
+fn settle_to_fixed_point(mut candidates: Vec<String>, options: &StitchOptions) -> String {
+    candidates.sort_by_key(|c| c.len());
+    if let Some(i) = candidates.iter().position(|c| is_fixed_point(c, options)) {
+        return candidates.swap_remove(i);
+    }
+    candidates.remove(0)
+}
+
+/// True when one pipeline pass leaves `text` unchanged.
+fn is_fixed_point(text: &str, options: &StitchOptions) -> bool {
+    run_pipeline_entry(Cow::Borrowed(text), options).as_ref() == text
 }
 
 /// Single pipeline invocation: fast-path trigger scan + builtin stages.
@@ -633,7 +623,7 @@ mod tests;
 
 #[cfg(test)]
 mod pipeline_tests {
-    use super::BUILTIN_ORDER;
+    use super::{BUILTIN_ORDER, StitchOptions, is_fixed_point, settle_to_fixed_point, stitch};
 
     /// Execution order must match ascending `priority()` — the priority sort
     /// in the custom-handler path is only correct if the base table already
@@ -652,5 +642,36 @@ mod pipeline_tests {
         // Sanity: the table and the enum's variants are in 1:1 correspondence
         // (minus none, plus the html-rerun pseudo-stage).
         assert_eq!(BUILTIN_ORDER.len(), 15);
+    }
+
+    /// The oscillation fallback must return a state that is genuinely a
+    /// fixed point, not merely the shortest string handed to it.
+    #[test]
+    fn settle_prefers_a_fixed_point_over_the_shortest_candidate() {
+        let opts = StitchOptions::default();
+        // `"*unclosed"` needs a closer; `"*unclosed*"` is already a fixed
+        // point. The shortest candidate is the former, so a length-only
+        // choice would return a non-fixed-point.
+        let shortest = "*unclosed".to_string();
+        let fixed = stitch(&shortest, &opts).into_owned();
+        assert!(is_fixed_point(&fixed, &opts));
+
+        let chosen = settle_to_fixed_point(vec![shortest.clone(), fixed.clone()], &opts);
+        assert_eq!(chosen, fixed);
+        assert!(is_fixed_point(&chosen, &opts));
+    }
+
+    /// With no fixed point among the candidates the fallback degrades to the
+    /// shortest one rather than panicking or looping.
+    #[test]
+    fn settle_degrades_to_shortest_when_nothing_is_stable() {
+        let opts = StitchOptions::default();
+        // Both need a closer, so neither is a fixed point.
+        let a = "*a".to_string();
+        let b = "*aa".to_string();
+        assert!(!is_fixed_point(&a, &opts) && !is_fixed_point(&b, &opts));
+
+        let chosen = settle_to_fixed_point(vec![b, a.clone()], &opts);
+        assert_eq!(chosen, a);
     }
 }
