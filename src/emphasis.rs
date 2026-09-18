@@ -557,9 +557,16 @@ fn gate_block_math_swallow(text: &str, first_idx: usize, ranges: &CodeBlockRange
     unclosed_block_math_after(text, first_idx + 1, ranges).is_some()
 }
 
-/// Gate B (inline math): refuse when an odd number of unclosed single `$`
-/// follows `first_idx` — inline_katex would append `$` in the same pass,
-/// wrapping the appended closer inside a complete `$…$` span that hides it.
+/// Gate B (inline math): refuse when the text carries an odd number of
+/// unclosed single `$` — inline_katex would append `$` in the same pass,
+/// wrapping the emphasis closer inside a complete `$…$` span that hides it.
+///
+/// The count is whole-text rather than scanned after the opener because
+/// handlers that run *before* inline_katex (bold, double_underscore,
+/// bold_italic) commit on the first pass to exactly the parity inline_katex
+/// will act on: a leading `$` counts even when it sits before their opener.
+/// (`$*A**`\n`A` — bold appends `**` past the midpoint, inline_katex closes
+/// the leading `$`, and pass 2 re-pairs the span to swallow the `**`.)
 ///
 /// Also refuses when EOF is a single `$` that was *split off* a `$$` run
 /// (`...$x$` with the trailing one paired in the dollar-scan): whatever the
@@ -568,41 +575,18 @@ fn gate_block_math_swallow(text: &str, first_idx: usize, ranges: &CodeBlockRange
 /// dollars and is invisible to any counter that skips past them.
 /// (`$$$A$*$a` — italic appends `*`, then inline_katex appends `$`, and the
 /// next pass sees `$$` + content + `$` again, with the `*` inside.)
-fn gate_inline_math_swallow(text: &str, first_idx: usize, ranges: &CodeBlockRanges) -> bool {
-    if count_gate_relevant_single_dollars(text, first_idx + 1, ranges) % 2 == 1 {
-        return true;
-    }
-    gate_inline_math_swallow_tail_check(text, 0, ranges)
-}
-
-/// Whole-text variant of Gate B for handlers that run *before* inline_katex
-/// in one pass (bold / double_underscore / bold_italic): on the first pass
-/// the dollar count katex commits to spans the entire text, so scanning
-/// after `first_idx` misses a leading `$` that will get closed once
-/// inline_katex appends. (`$*A**`\n`A` → bold appends `**` past the
-/// midpoint, inline_katex closes the leading `$`, and pass 2 re-pairs the
-/// math span to swallow the appended `**`.)
-/// `first_idx` remains the scan floor for pass ≥ 2 (matters once italic_*
-/// has run and left its own trail).
-fn gate_inline_math_swallow_from_start(
-    text: &str,
-    _first_idx: usize,
-    ranges: &CodeBlockRanges,
-) -> bool {
+fn gate_inline_math_swallow(text: &str, ranges: &CodeBlockRanges) -> bool {
     if count_gate_relevant_single_dollars(text, 0, ranges) % 2 == 1 {
         return true;
     }
-    gate_inline_math_swallow_tail_check(text, 0, ranges)
+    gate_inline_math_swallow_tail_check(text, ranges)
 }
 
 /// Shared tail of Gate B: the "EOF ends in a state inline_katex can flip
-/// this pass" checks. These are content-only, so they don't depend on where
-/// the count scan started.
-fn gate_inline_math_swallow_tail_check(
-    text: &str,
-    _scan_floor: usize,
-    ranges: &CodeBlockRanges,
-) -> bool {
+/// this pass" checks. These are content-only — they read the end of the text
+/// and the whole-text dollar parity, so they don't depend on where the
+/// caller's count scan started.
+fn gate_inline_math_swallow_tail_check(text: &str, ranges: &CodeBlockRanges) -> bool {
     let bytes = text.as_bytes();
     let len = bytes.len();
     // A trailing `$` that sits directly after non-`$`/non-`\` content can be
@@ -650,7 +634,7 @@ fn gate_inline_code_swallow(text: &str, first_idx: usize, ranges: &CodeBlockRang
 /// at EOF, past every byte that follows the opener.
 fn gate_refuses_append_from(text: &str, from_idx: usize, ranges: &CodeBlockRanges) -> bool {
     gate_block_math_swallow(text, from_idx, ranges)
-        || gate_inline_math_swallow(text, from_idx, ranges)
+        || gate_inline_math_swallow(text, ranges)
         || gate_inline_code_swallow(text, from_idx, ranges)
 }
 
@@ -700,7 +684,7 @@ pub(crate) fn handle_bold_with_ranges<'a>(text: &'a str, ranges: &CodeBlockRange
         // (`**bold with `code``).
         if content.ends_with('*') {
             if gate_inline_code_swallow(text, marker_index, ranges)
-                || gate_inline_math_swallow(text, marker_index, ranges)
+                || gate_inline_math_swallow(text, ranges)
             {
                 return Cow::Borrowed(text);
             }
@@ -724,7 +708,7 @@ pub(crate) fn handle_bold_with_ranges<'a>(text: &'a str, ranges: &CodeBlockRange
         // text already ends with `*` (`$*A**`): the italic counter would
         // read the resulting trailing run one way before inline_katex acts
         // and another way after, so the pair transfer breaks idempotency.
-        if gate_inline_math_swallow_from_start(text, marker_index, ranges) {
+        if gate_inline_math_swallow(text, ranges) {
             let window = &text.as_bytes()[marker_index + 2..];
             let has_word_after = window.iter().any(|&b| b.is_ascii_alphanumeric());
             if !has_word_after || text.ends_with('*') {
