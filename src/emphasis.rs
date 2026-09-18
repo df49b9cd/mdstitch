@@ -848,6 +848,13 @@ pub(crate) fn handle_italic_asterisk_with_ranges<'a>(
     if ranges.is_inside_code(first_idx) || ranges.is_within_complete_inline_code(first_idx) {
         return Cow::Borrowed(text);
     }
+    // When EOF itself sits inside an unclosed code span, an appended `*`
+    // lands inside it on every pass — invisible to the single-`*` counter
+    // (`` ``_*>__`` family reads the prior appended `*` and re-appends).
+    // Same self-stability rule katex_block applies via is_inside_code(len).
+    if ranges.is_inside_code(text.len()) {
+        return Cow::Borrowed(text);
+    }
 
     let content_after = &text[first_idx + 1..];
     if content_after.is_empty() || is_empty_or_markers(content_after) {
@@ -940,6 +947,14 @@ pub(crate) fn handle_italic_underscore_with_ranges<'a>(
     }
 
     if ranges.is_inside_code(first_idx) || ranges.is_within_complete_inline_code(first_idx) {
+        return Cow::Borrowed(text);
+    }
+    // When EOF itself sits inside an unclosed code span (`is_inside_code(len)`),
+    // any `_` appended at EOF lands inside that span — invisible to the
+    // counter on every pass — so the count stays odd and the fixpoint loop
+    // grows forever. (`` ``_*>__`` family.) The same self-stability rule
+    // katex_block already applies.
+    if ranges.is_inside_code(text.len()) {
         return Cow::Borrowed(text);
     }
 
@@ -1119,6 +1134,12 @@ fn is_asterisk_run(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+
+
+
+
+
 
 
 

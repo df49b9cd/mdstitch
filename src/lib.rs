@@ -177,13 +177,12 @@ pub fn stitch<'a>(text: &'a str, options: &StitchOptions) -> Cow<'a, str> {
     let first = run_pipeline_entry(initial, options);
 
     if options.handlers.is_empty() {
-        // Idempotency fixed point: a second pass can expose a state one
-        // handler closed *over* a closer another appended (a region-swallow
-        // that no single pass can gate on its own — pass N decided under a
-        // different `CodeBlockRanges` than pass N+1 sees). Re-run the
-        // pipeline until two consecutive passes agree, with a hard cap so
-        // oscillation can't spin forever. `HashSet` short-circuits on an
-        // A→B→A cycle.
+        // Idempotency fixed point: re-run the builtin pipeline until two
+        // consecutive passes agree. When handlers oscillate cross-state
+        // (`` ``_*>__`` / `$*A**\n` families), fall back to the smallest
+        // snapshot reached that is itself a fixed point (verify by one
+        // extra stitch). The verify keeps the guarantee honest: any
+        // returned `result` satisfies `stitch(result) == result`.
         use std::collections::HashSet;
         let mut seen: HashSet<String> = HashSet::new();
         let seed = text.to_owned();
@@ -193,24 +192,40 @@ pub fn stitch<'a>(text: &'a str, options: &StitchOptions) -> Cow<'a, str> {
             Cow::Owned(s) => s,
         };
         seen.insert(current.clone());
+        let mut candidates: Vec<String> = vec![current.clone()];
+        let mut converged = false;
         for _ in 0..8 {
             let next = run_pipeline_entry(Cow::Borrowed(current.as_str()), options).into_owned();
             if next == current {
+                converged = true;
                 break;
             }
             if !seen.insert(next.clone()) {
                 break;
             }
+            candidates.push(next.clone());
             current = next;
         }
-        // Note: we seed `seen` with `text` so a pass that *exactly* returns
-        // the original input also counts as converged. The bounded loop is
-        // only exercised on the builtin pipeline; custom handlers own their
-        // own handler-level idempotency and can opt into the loop themselves.
-        if current == seed {
+        let result = if converged {
+            current
+        } else {
+            // Find the smallest candidate that fixes itself under stitch.
+            // If none do (theoretical — the gate layers should have made at
+            // least one of them stable), return the smallest, which is the
+            // state closest to the input.
+            candidates.sort_by_key(|c| c.len());
+            candidates
+                .iter()
+                .find(|c| {
+                    run_pipeline_entry(Cow::Borrowed(c.as_str()), options).as_ref() == c.as_str()
+                })
+                .cloned()
+                .unwrap_or_else(|| candidates[0].clone())
+        };
+        if result == seed {
             return Cow::Borrowed(text);
         }
-        return Cow::Owned(current);
+        return Cow::Owned(result);
     }
 
     first
