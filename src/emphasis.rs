@@ -557,16 +557,6 @@ fn gate_block_math_swallow(text: &str, first_idx: usize, ranges: &CodeBlockRange
     unclosed_block_math_after(text, first_idx + 1, ranges).is_some()
 }
 
-/// True when Gate A can be dropped because the appended closer stays
-/// visible: bold has *already* appended `**` at EOF this pass (so the
-/// trailing `*`-run bold introduced is what a later emphasis pass sees
-/// first — italic_* then reads this state consistently). Concretely: the
-/// text ends with `**` and the run of double-asterisk pairs is odd —
-/// that's the "bold just closed" signature.
-fn gate_append_is_bold_stable(text: &str) -> bool {
-    text.ends_with("**") && count_double_asterisks(text).is_multiple_of(2)
-}
-
 /// Gate B (inline math): refuse when an odd number of unclosed single `$`
 /// follows `first_idx` — inline_katex would append `$` in the same pass,
 /// wrapping the appended closer inside a complete `$…$` span that hides it.
@@ -659,12 +649,6 @@ fn gate_inline_code_swallow(text: &str, first_idx: usize, ranges: &CodeBlockRang
 /// with — gates scan strictly *after* it because the appended closer lands
 /// at EOF, past every byte that follows the opener.
 fn gate_refuses_append_from(text: &str, from_idx: usize, ranges: &CodeBlockRanges) -> bool {
-    if gate_append_is_bold_stable(text) {
-        // Bold just closed (`**…**` … `**` at EOF); italic_* sees the trailing
-        // run as its own closer — no later region will swallow it away from
-        // under it, so the block/inline gates can stay off this pass.
-        return false;
-    }
     gate_block_math_swallow(text, from_idx, ranges)
         || gate_inline_math_swallow(text, from_idx, ranges)
         || gate_inline_code_swallow(text, from_idx, ranges)
@@ -858,16 +842,23 @@ pub(crate) fn handle_italic_asterisk_with_ranges<'a>(
     if ranges.is_inside_code(first_idx) || ranges.is_within_complete_inline_code(first_idx) {
         return Cow::Borrowed(text);
     }
-    // When EOF itself sits inside an unclosed code span, an appended `*`
-    // lands inside it on every pass — invisible to the single-`*` counter
-    // (`` ``_*>__`` family reads the prior appended `*` and re-appends).
-    // Same self-stability rule katex_block applies via is_inside_code(len).
-    if ranges.is_inside_code(text.len()) {
-        return Cow::Borrowed(text);
-    }
 
     let content_after = &text[first_idx + 1..];
     if content_after.is_empty() || is_empty_or_markers(content_after) {
+        return Cow::Borrowed(text);
+    }
+    // Same self-stability rule as italic_underscore: an appended `*`
+    // immediately inside an unclosed code span is invisible to the
+    // counter, so the fixpoint loop keeps growing the text. Skip only when
+    // the content after the opener is marker-only (meaning the span carries
+    // no real text either way) so real content "`` `abc` unfinished" still
+    // gets its `*` at the midpoint.
+    if ranges.is_inside_code(text.len())
+        && content_after.bytes().all(|b| {
+            matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b'*' | b'_' | b'`' | b'~' | b'\\' | b'$')
+                || !b.is_ascii()
+        })
+    {
         return Cow::Borrowed(text);
     }
 
@@ -919,6 +910,17 @@ pub(crate) fn handle_italic_asterisk_with_ranges<'a>(
                 return Cow::Borrowed(text);
             }
         }
+        // Cross-handler inert-run gate: an appended `*` right after a `_`
+        // creates a `_…_*` tail. Next pass italic_underscore's inert-run
+        // rule treats the `_` as already-closed, so its count drops and it
+        // re-appends `_` — which italic_asterisk, having landed past `_`,
+        // now reads as a fresh opener. (`` ``_*>__`` family.) Refuse when
+        // the implied `_…*` lies inside an unclosed code span — italic_*
+        // isn't allowed to steal code bytes, and the later pass's inert-run
+        // state would disappear.
+        if text.ends_with('_') && ranges.is_inside_code(text.len()) {
+            return Cow::Borrowed(text);
+        }
         // Swallow gates: refuse `*` if a later handler (katex_block /
         // inline_katex / inline_code) would close a region over it,
         // hiding the appended closer from this counter on the next pass.
@@ -959,12 +961,20 @@ pub(crate) fn handle_italic_underscore_with_ranges<'a>(
     if ranges.is_inside_code(first_idx) || ranges.is_within_complete_inline_code(first_idx) {
         return Cow::Borrowed(text);
     }
-    // When EOF itself sits inside an unclosed code span (`is_inside_code(len)`),
-    // any `_` appended at EOF lands inside that span — invisible to the
-    // counter on every pass — so the count stays odd and the fixpoint loop
-    // grows forever. (`` ``_*>__`` family.) The same self-stability rule
-    // katex_block already applies.
-    if ranges.is_inside_code(text.len()) {
+    // When EOF sits inside an unclosed code span (`is_inside_code(len)`),
+    // an appended `_` lands inside that span — invisible to the counter on
+    // every pass — so the count stays odd and the fixpoint loop grows
+    // forever. Only fires when the content after the opener is itself only
+    // markers (`_`, `*`, `` ` ``, `~`, whitespace, `\`, `$`): a trailing
+    // word char means the span still has real inner content and the
+    // existing is_empty_or_markers check already let it through. Same
+    // self-stability rule katex_block applies via `is_inside_code(len)`.
+    if ranges.is_inside_code(text.len())
+        && content_after.bytes().all(|b| {
+            matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b'*' | b'_' | b'`' | b'~' | b'\\' | b'$')
+                || !b.is_ascii()
+        })
+    {
         return Cow::Borrowed(text);
     }
 
@@ -996,6 +1006,18 @@ pub(crate) fn handle_italic_underscore_with_ranges<'a>(
                 || (before.last() == Some(&b'\\') && !is_escaped(text.as_bytes(), text.len() - 2))
         } {
             return Cow::Borrowed(text);
+        }
+        // Same inert shape one byte earlier: trailing `_*` where the `_` was
+        // already counted. Appending `_` lands past the `*` and shifts the
+        // invisible window left, which italic_asterisk then treats as a
+        // fresh opener next pass — the cross-handler loop never settles.
+        // (`` ``_*>___*`` family.)
+        if text.ends_with('*') && text.len() >= 2 {
+            let bytes = text.as_bytes();
+            let star_pos = bytes.len() - 1;
+            if star_pos >= 1 && bytes[star_pos - 1] == b'_' {
+                return Cow::Borrowed(text);
+            }
         }
         // Swallow gates: refuse `_` if a later handler (katex_block /
         // inline_katex) would close a region over it, hiding the appended
@@ -1144,6 +1166,7 @@ fn is_asterisk_run(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+
 
     use super::{
         count_double_asterisks, count_double_underscores, count_single_asterisks,

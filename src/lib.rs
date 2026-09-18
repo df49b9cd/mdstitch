@@ -209,18 +209,39 @@ pub fn stitch<'a>(text: &'a str, options: &StitchOptions) -> Cow<'a, str> {
         let result = if converged {
             current
         } else {
-            // Find the smallest candidate that fixes itself under stitch.
-            // If none do (theoretical — the gate layers should have made at
-            // least one of them stable), return the smallest, which is the
-            // state closest to the input.
+            // No fixpoint in the window — handlers oscillate. Find a stable
+            // resting state by repeating the loop on each candidate until
+            // one returns itself. The smallest such snapshot is the
+            // canonical answer; without one, the smallest candidate overall
+            // is the closest the pipeline ever got.
             candidates.sort_by_key(|c| c.len());
-            candidates
-                .iter()
-                .find(|c| {
-                    run_pipeline_entry(Cow::Borrowed(c.as_str()), options).as_ref() == c.as_str()
-                })
-                .cloned()
-                .unwrap_or_else(|| candidates[0].clone())
+            let mut found = None;
+            'outer: for c in &candidates {
+                // Nested loop over the same trajectory bounded by the same
+                // cap. On a true fixpoint this exits after one round.
+                let mut inner: HashSet<String> = HashSet::new();
+                let mut cur_c = c.clone();
+                for _ in 0..8 {
+                    let next =
+                        run_pipeline_entry(Cow::Borrowed(cur_c.as_str()), options).into_owned();
+                    if next == cur_c {
+                        cur_c = next;
+                        break;
+                    }
+                    cur_c = next;
+                    if !inner.insert(cur_c.clone()) {
+                        // Cross-iteration cycle: not a fixed point.
+                        break;
+                    }
+                }
+                // Converged to a self-stable state? Pick it.
+                let stable = run_pipeline_entry(Cow::Borrowed(cur_c.as_str()), options).into_owned();
+                if stable == cur_c {
+                    found = Some(cur_c);
+                    break 'outer;
+                }
+            }
+            found.unwrap_or_else(|| candidates[0].clone())
         };
         if result == seed {
             return Cow::Borrowed(text);
