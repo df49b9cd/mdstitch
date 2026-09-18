@@ -25,9 +25,9 @@ full option matrix, enforced rather than incidental.
     flipped the italic single-`*` counter between passes.
   - `<A <A` (html_tags): stripping the trailing incomplete tag exposed an
     earlier strippable one, so the strip was not self-stable.
-  - `` $`, `` (inline_code + inline_katex): each handler's open-state check
-    ignored the other's.
-  - ``` ``_*>__ ``` and `$$_\`\n` (italic): the underscore completer
+  - "backtick dollar comma" (inline_code + inline_katex): each handler's
+    open-state check ignored the other's.
+  - `` ``_*>__ `` and `$$_\`\n` (italic): the underscore completer
     re-inserted `_` beside an existing `_` run or an unescaped `\` on every
     pass, and `should_skip_underscore` skips exactly those, so each insert
     was invisible from birth and the run grew without bound.
