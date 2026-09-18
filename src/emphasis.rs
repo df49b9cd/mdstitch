@@ -444,8 +444,134 @@ fn find_first_single_marker_index_with_ranges(
 }
 
 // ---------------------------------------------------------------------------
+// Cross-handler swallow gates
+// ---------------------------------------------------------------------------
+//
+// Each appending handler must answer: "after I append, will MY next pass still
+// see the closer I just added?" A closer is invisible when a *later* handler
+// (katex, inline_code) completes a region that contains the appended byte.
+// The gates below refuse the append whenever such a region would swallow it.
+// They are content-keyed (positions of `$$`/`$`/backticks outside code), not
+// priority-keyed, so pass order stays untouched.
+
+/// Scans `text[start..]` for an unescaped `$$` run outside code, probing both
+/// the first and the second byte of each run so a `$$` whose second byte lands
+/// in complete math still counts. Returns the index of the first `$`.
+///
+/// Gate A: if such a `$$` sits after the first counted italic marker, the
+/// appended closer would be swallowed by a math span on the next pass —
+/// whether katex closes that `$$` in this pass (`*A$$\n`) or it is already
+/// closed (`*A$$\n$$`). Either way the appended byte ends up inside a region
+/// the counter cannot see into.
+fn unclosed_block_math_after(text: &str, start: usize, ranges: &CodeBlockRanges) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let len = bytes.len();
+    let mut i = start;
+    while i + 1 < len {
+        if bytes[i] == b'\\' {
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'$' && bytes[i + 1] == b'$' {
+            if !ranges.is_inside_code(i) && !ranges.is_inside_code(i + 1) {
+                return Some(i);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Counts unescaped, non-`$$` `$` bytes in `text[start..]` that are outside
+/// code and outside complete math — i.e. singles inline_katex would still see.
+fn count_gate_relevant_single_dollars(text: &str, start: usize, ranges: &CodeBlockRanges) -> usize {
+    let bytes = text.as_bytes();
+    let len = bytes.len();
+    let mut i = start;
+    let mut count = 0;
+    while i < len {
+        if bytes[i] == b'\\' {
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'$' {
+            if i + 1 < len && bytes[i + 1] == b'$' {
+                i += 2;
+                continue;
+            }
+            if !ranges.is_inside_code(i) && !ranges.is_within_complete_math(i) {
+                count += 1;
+            }
+        }
+        i += 1;
+    }
+    count
+}
+
+/// Counts unescaped single backticks in `text[start..]` outside code —
+/// candidates inline_code would close *after* the emphasis handlers ran.
+/// (Triple runs are fence-ish and inline_code leaves them alone.)
+fn count_gate_relevant_single_backticks(text: &str, start: usize, ranges: &CodeBlockRanges) -> usize {
+    let bytes = text.as_bytes();
+    let len = bytes.len();
+    let mut i = start;
+    let mut count = 0;
+    while i < len {
+        if bytes[i] == b'\\' {
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'`' {
+            let run_start = i;
+            while i < len && bytes[i] == b'`' {
+                i += 1;
+            }
+            let run_len = i - run_start;
+            if run_len == 1
+                && !ranges.is_inside_code(run_start)
+                && !ranges.is_within_complete_math(run_start)
+            {
+                count += 1;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    count
+}
+
+/// Gate A (block math): refuse the append if an unclosed `$$` after `first_idx`
+/// would make the appended closer invisible inside `$$…$$` on the next pass.
+fn gate_block_math_swallow(text: &str, first_idx: usize, ranges: &CodeBlockRanges) -> bool {
+    unclosed_block_math_after(text, first_idx + 1, ranges).is_some()
+}
+
+/// Gate B (inline math): refuse when an odd number of unclosed single `$`
+/// follows `first_idx` — inline_katex would append `$` in the same pass,
+/// wrapping the appended closer inside a complete `$…$` span that hides it.
+fn gate_inline_math_swallow(text: &str, first_idx: usize, ranges: &CodeBlockRanges) -> bool {
+    count_gate_relevant_single_dollars(text, first_idx + 1, ranges) % 2 == 1
+}
+
+/// Gate C (inline code): refuse when inline_code (running earlier in the
+/// pipeline) already left a dangling single backtick open after `first_idx`
+/// — the appended closer would land inside the still-unclosed span, so the
+/// emphasis counter cannot see it on the next pass.
+fn gate_inline_code_swallow(text: &str, first_idx: usize, ranges: &CodeBlockRanges) -> bool {
+    count_gate_relevant_single_backticks(text, first_idx + 1, ranges) % 2 == 1
+}
+
+/// Combined per-handler gate: any of A/B/C true → do not append.
+fn gate_refuses_emphasis_append(text: &str, first_idx: usize, ranges: &CodeBlockRanges) -> bool {
+    gate_block_math_swallow(text, first_idx, ranges)
+        || gate_inline_math_swallow(text, first_idx, ranges)
+        || gate_inline_code_swallow(text, first_idx, ranges)
+}
+
+// ---------------------------------------------------------------------------
 // Public handler functions
 // ---------------------------------------------------------------------------
+
 
 /// Completes incomplete bold formatting (`**`).
 /// Test-only convenience wrapper that builds `CodeBlockRanges` on the fly.
@@ -643,6 +769,12 @@ pub(crate) fn handle_italic_asterisk_with_ranges<'a>(
                 return Cow::Borrowed(text);
             }
         }
+        // Swallow gates: refuse `*` if a later handler (katex_block /
+        // inline_katex / inline_code) would close a region over it,
+        // hiding the appended closer from this counter on the next pass.
+        if gate_refuses_emphasis_append(text, first_idx, ranges) {
+            return Cow::Borrowed(text);
+        }
         return cow_append(text, "*");
     }
 
@@ -705,6 +837,12 @@ pub(crate) fn handle_italic_underscore_with_ranges<'a>(
             before.last() == Some(&b'_')
                 || (before.last() == Some(&b'\\') && !is_escaped(text.as_bytes(), text.len() - 2))
         } {
+            return Cow::Borrowed(text);
+        }
+        // Swallow gates: refuse `_` if a later handler (katex_block /
+        // inline_katex) would close a region over it, hiding the appended
+        // closer from this counter on the next pass.
+        if gate_refuses_emphasis_append(text, first_idx, ranges) {
             return Cow::Borrowed(text);
         }
         return insert_closing_underscore(text);

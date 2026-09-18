@@ -440,6 +440,46 @@ fn idempotency_seeds_pipeline() {
                 o.italic = true;
             }),
         ),
+        // Regression 0152: `"*A$$\n"`, italic + block katex. Italic appends
+        // `*` for the lone opener; katex_block later appends `\n$$`,
+        // wrapping the appended closer inside `$$…$$` where italic's counter
+        // can't see it → re-append loop on pass 2.
+        (
+            "*A$$\n",
+            only(|o| {
+                o.italic = true;
+                o.katex = true;
+            }),
+        ),
+        // Regression 0153: `"_$,` variant — italic appends `_` after the
+        // trailing `$`; inline_katex then appends `$`; pass 2 sees `_$_`
+        // balanced katex-wise but odd italic-wise vs the first pass.
+        (
+            "_$,",
+            only(|o| {
+                o.italic = true;
+                o.inline_katex = true;
+            }),
+        ),
+        // Regression 0154: like 0153 but the `$$` is *closed*, so the gate
+        // cannot key on "unclosed math" — italic's `*` would land between
+        // the closer `$$` and inline_katex's appended `$`.
+        (
+            "$$*$",
+            only(|o| {
+                o.italic = true;
+                o.inline_katex = true;
+            }),
+        ),
+        // Regression 0155: inline_code's backtick-append and inline_katex's
+        // `$`-append cross-fire — each doesn't check the other's open state.
+        (
+            "$`,",
+            only(|o| {
+                o.inline_code = true;
+                o.inline_katex = true;
+            }),
+        ),
     ];
 
     for (input, opts) in seeds {
