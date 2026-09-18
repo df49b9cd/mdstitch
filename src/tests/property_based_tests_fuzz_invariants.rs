@@ -418,6 +418,11 @@ fn idempotency_seeds_pipeline() {
                 o.link_mode = LinkMode::TextOnly;
             }),
         ),
+        // Regression 0150 (currently failing — `[ignore]`d at the pipeline
+        // level): `italic_double_underscore` sees `_0__` as an unclosed `__`
+        // pair and appends `__`; a second pass then sees `_0____` and adds
+        // another `_`. Not yet fixed — kept here as the canonical reproducer
+        // when the italic-layer gates get their dedicated redesign pass.
     ];
 
     for (input, opts) in seeds {
