@@ -97,6 +97,19 @@ priority sort and a hardcoded fast path). They drifted once on the
 is baked into the design: `BUILTIN_ORDER` is the single source of truth,
 and the priority-sort test pins it.
 
+### Idempotency
+
+`stitch(stitch(x)) == stitch(x)` does **not** fall out of the priority
+order — a region a later handler creates (math / inline-code) can swallow
+a closer an earlier handler appended, so each appending handler refuses
+its append through content-keyed gates (`emphasis::gate_*_swallow`, the
+html_tags early-exposure check) that consult `CodeBlockRanges`. When a
+pair of handlers would still oscillate because neither can predict the
+region the other closes, a bounded fixpoint loop in `run_pipeline`
+re-runs the builtin stages until two consecutive passes agree (≤ 8
+iterations, cycle-detected, smallest fixed candidate wins). Custom
+handlers skip the loop — their idempotency is per-handler.
+
 ### 4. Stage mechanics
 
 Each stage threads a `Cow<str>` through [`apply_with`](src/lib.rs), which

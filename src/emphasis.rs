@@ -472,10 +472,12 @@ fn unclosed_block_math_after(text: &str, start: usize, ranges: &CodeBlockRanges)
             i += 2;
             continue;
         }
-        if bytes[i] == b'$' && bytes[i + 1] == b'$' {
-            if !ranges.is_inside_code(i) && !ranges.is_inside_code(i + 1) {
-                return Some(i);
-            }
+        if bytes[i] == b'$'
+            && bytes[i + 1] == b'$'
+            && !ranges.is_inside_code(i)
+            && !ranges.is_inside_code(i + 1)
+        {
+            return Some(i);
         }
         i += 1;
     }
@@ -520,7 +522,11 @@ fn count_gate_relevant_single_dollars(text: &str, start: usize, ranges: &CodeBlo
 /// scan this intentionally ignores `is_inside_code` — the trailing backtick
 /// of an in-progress span sits "inside code" by position yet is exactly the
 /// terminal the emphasis closer would land past.
-fn count_gate_relevant_single_backticks(text: &str, start: usize, _ranges: &CodeBlockRanges) -> usize {
+fn count_gate_relevant_single_backticks(
+    text: &str,
+    start: usize,
+    _ranges: &CodeBlockRanges,
+) -> usize {
     let bytes = text.as_bytes();
     let len = bytes.len();
     let mut i = start;
@@ -558,7 +564,7 @@ fn gate_block_math_swallow(text: &str, first_idx: usize, ranges: &CodeBlockRange
 /// text ends with `**` and the run of double-asterisk pairs is odd —
 /// that's the "bold just closed" signature.
 fn gate_append_is_bold_stable(text: &str) -> bool {
-    text.ends_with("**") && count_double_asterisks(text) % 2 == 0
+    text.ends_with("**") && count_double_asterisks(text).is_multiple_of(2)
 }
 
 /// Gate B (inline math): refuse when an odd number of unclosed single `$`
@@ -602,7 +608,11 @@ fn gate_inline_math_swallow_from_start(
 /// Shared tail of Gate B: the "EOF ends in a state inline_katex can flip
 /// this pass" checks. These are content-only, so they don't depend on where
 /// the count scan started.
-fn gate_inline_math_swallow_tail_check(text: &str, _scan_floor: usize, ranges: &CodeBlockRanges) -> bool {
+fn gate_inline_math_swallow_tail_check(
+    text: &str,
+    _scan_floor: usize,
+    ranges: &CodeBlockRanges,
+) -> bool {
     let bytes = text.as_bytes();
     let len = bytes.len();
     // A trailing `$` that sits directly after non-`$`/non-`\` content can be
@@ -623,7 +633,8 @@ fn gate_inline_math_swallow_tail_check(text: &str, _scan_floor: usize, ranges: &
     // is invisible on the next pass. (`$*\rA**`\n`A` / `$*A**\n`A` family.)
     // Only relevant when an *unclosed* single `$` sits anywhere in the text
     // (otherwise inline_katex appended nothing and the `**` stays pure).
-    if len >= 2 && bytes[len - 2..] == *b"**"
+    if len >= 2
+        && bytes[len - 2..] == *b"**"
         && count_gate_relevant_single_dollars(text, 0, ranges) % 2 == 1
     {
         return true;
@@ -662,7 +673,6 @@ fn gate_refuses_append_from(text: &str, from_idx: usize, ranges: &CodeBlockRange
 // ---------------------------------------------------------------------------
 // Public handler functions
 // ---------------------------------------------------------------------------
-
 
 /// Completes incomplete bold formatting (`**`).
 /// Test-only convenience wrapper that builds `CodeBlockRanges` on the fly.
@@ -1134,23 +1144,6 @@ fn is_asterisk_run(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     use super::{
         count_double_asterisks, count_double_underscores, count_single_asterisks,

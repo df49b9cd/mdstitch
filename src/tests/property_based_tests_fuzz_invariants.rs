@@ -480,6 +480,55 @@ fn idempotency_seeds_pipeline() {
                 o.inline_katex = true;
             }),
         ),
+        // Regression 0156: html_tags stripped the trailing `<A` of `<A <A`,
+        // exposing an *earlier* incomplete tag at the new end — the outer
+        // strip wasn't self-stable. Fix: html_tags walks the prefix alive and
+        // refuses to strip when a strippable earlier `<` sits behind the one
+        // at the end.
+        (
+            "<A <A",
+            only(|o| {
+                o.html_tags = true;
+            }),
+        ),
+        // Regression 0157: `$``$$**`, italic+inline_katex: bold appends
+        // `**`, inline_katex appends `$`, the appended `**` lands inside
+        // what the next pass reads as `$$…$$` complete math.
+        (
+            "$``$$**",
+            only(|o| {
+                o.bold = true;
+                o.inline_katex = true;
+            }),
+        ),
+        // Regression 0158: `$$$A$*$a`, italic+inline_katex: italic appends
+        // `*`, inline_katex appends `$`, the next pass re-reads the trailing
+        // `$` as part of a `$$` pair, and the `*` lands inside math.
+        (
+            "$$$A$*$a",
+            only(|o| {
+                o.italic = true;
+                o.inline_katex = true;
+            }),
+        ),
+        // Regression 0159: `$*A**\n`A / `$*\rA**\r*\n` — inline_katex's `$`
+        // closes past the bold-appended `**`, and on pass 2 italic_asterisk
+        // re-pairs the visible opener with the fresh `**` and appends.
+        (
+            "$*A**`\n`A",
+            only(|o| {
+                o.bold = true;
+                o.italic = true;
+                o.inline_katex = true;
+            }),
+        ),
+        // Regression 0160: KNOWN-OPEN. `` ``_*>__``, italic-only — italic's
+        // counter reads an appended trailing `*` as an adequate closer while
+        // the code-region scan keeps marking it inside the pre-existing
+        // unclosed `` `` `` span, so each pass adds one more marker and the
+        // fixpoint oscillates. Tracked at
+        // https://github.com/df49b9cd/mdstitch/issues — needs a counter-level
+        // visibility fix, not another gate.
     ];
 
     for (input, opts) in seeds {
@@ -536,27 +585,24 @@ proptest! {
     // (`idempotency_regression_*` / `idempotency_seeds_pipeline`) pin the
     // individual failure families discovered by this sweep.
     //
-    // Remaining failing families (as of fdc2b2a; run with --ignored):
-    //   1. `"*A$$\n"`, italic + block katex — italic runs before katex and
-    //      appends `*` after the `$$` that katex will close, so the appended
-    //      closer lands inside the complete math span on the next pass and
-    //      the count stays odd.
-    //   2. `"*>\*"`, italic — a trailing backslash escapes the only counted
-    //      `*`; italic appends again, the run grows, and the count is
-    //      perpetually odd (the escaped `*` is invisible to the count on
-    //      downstream passes).
-    //   3. `"`$\n$*"`, italic + inline_katex — the math range pairing used to
-    //      disagree with the katex counter when a `$` sat inside an inline
-    //      code span, mis-pairing the trailing pair (fixed in fence.rs /
-    //      ranges.rs by masking code in math scans).
+    // Pipeline idempotency invariant: stitch(stitch(x)) == stitch(x). The
+    // gates in emphasis.rs/katex.rs/html_tags.rs now keep every appending
+    // handler self-stable (no append when a later handler's region would
+    // swallow the closer), and a bounded fixpoint loop in `run_pipeline`
+    // re-runs builtin stages until a fixed point is reached. The regression
+    // corpus under proptest-regressions/tests/ replays on every CI push via
+    // the `seeds` job in .github/workflows/ci.yml.
     //
-    // These three represent a cross-handler ordering tension that priority
-    // reordering alone cannot resolve (each fix breaks the currently-green
-    // regression suite for the other family). Track at
-    // https://github.com/df49b9cd/mdstitch/issues. All saved seeds live at
-    // proptest-regressions/tests/property_based_tests_fuzz_invariants.txt —
-    // proptest's SourceParallel mode mirrors the source path, so seeds here
-    // were dead from the `src/tests/` split until now.
+    // Known remaining family (tracked at
+    // https://github.com/df49b9cd/mdstitch/issues): `` ``_*>__`` with
+    // italic-only — italic's counter regards an appended trailing `*` as an
+    // adequate closer while the code-region scan keeps marking it inside
+    // the pre-existing unclosed `` `` `` span, so each pass adds one more
+    // marker and the loop oscillates. This needs a counter-level fix
+    // (visibility-aware counting), not a pass-order or gate tweak. Run the
+    // sweep with 50k cases:
+    //   PROPTEST_CASES=50000 PROPTEST_MAX_SHRINK_ITERS=8000 \
+    //     cargo test --lib --release -- --ignored fuzz_idempotent_all_option_combinations
     #[ignore]
     #[test]
     fn fuzz_idempotent_all_option_combinations(

@@ -8,6 +8,39 @@ All notable changes to `mdstitch` will be documented here. The format is based o
 
 ### Fixed
 
+- Idempotency violations under the idempotent fuzz sweep — five failure
+  families fixed via handler-side gates that refuse an append a later
+  handler would swallow into a region, plus a bounded fixpoint loop in
+  `run_pipeline` for the cross-handler shapes no single gate can settle:
+  - `*A$$\n` (italic + block katex): italic's `*` landed inside the `$$…$$`
+    the katex_block pass closed in the same sweep.
+  - `_$,` / `$$*$` / `$$$A$*$a` (italic + inline_katex): italic's closer
+    landed inside a `$…$` / `$$…$$` span once inline_katex ran.
+  - `$``$$**` (italic + inline_katex): bold's `**` and inline_katex's `$`
+    flipped the italic single-`*` counter between passes.
+  - `<A <A` (html_tags): stripping the trailing incomplete tag exposed an
+    earlier strippable one, so the strip was not self-stable.
+  - "` $``,`" shape (inline_code + inline_katex): each handler's
+    open-state check ignored the other's.
+- Carries the earlier seed fixes for `_0__`, `*>\*`, `_\<A\t`, `a~[A`,
+  `*A***a`, `[](`, `__$$*\r*\n`, `_\r$`, `$\`n\\`, and `` `$\n$* ``.
+
+### Added
+
+- `stitch` runs a bounded fixpoint loop over the builtin pipeline until two
+  consecutive passes agree (≤ 8 iterations, cycle-detected); custom
+  handlers are excluded — their idempotency is per-handler.
+- CI `seeds` job replays the persisted proptest corpus at reduced case
+  count on every push, so the regression seeds keep exercising even when
+  the 50 k sweep stays local-only.
+
+### Changed
+
+- `options::priority` doc clarifies that priorities are still ascending;
+  idempotency comes from the handler gates, not the ordering.
+
+### Fixed
+
 - Math-range construction (`CodeBlockRanges::compute_math_ranges_impl` and
   `utils::is_within_math_block`) now treats `$` inside fenced code blocks and
   inline code spans as literal text, matching the katex handlers' counters.

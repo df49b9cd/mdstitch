@@ -42,6 +42,27 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  seeds:
+    # Cheap regression-corpus replay: runs every idempotency seed the sweep
+    # has ever produced (both the curated one-shot tripwires and the
+    # batched seed list) — the equivalent of "replay
+    # proptest-regressions/tests/property_based_tests_fuzz_invariants.txt"
+    # without paying for a 50k sweep. A failure here is a hard signal: a
+    # previously-fixed idempotency family regressed.
+    name: proptest seed replay
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust (pinned via rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Replay idempotency seeds
+        run: cargo test idempotency_
+
   bench-smoke:
     # Cheap guard that benches still compile and run; not a perf gate.
     name: benches compile
