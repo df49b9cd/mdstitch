@@ -418,11 +418,28 @@ fn idempotency_seeds_pipeline() {
                 o.link_mode = LinkMode::TextOnly;
             }),
         ),
-        // Regression 0150 (currently failing — `[ignore]`d at the pipeline
-        // level): `italic_double_underscore` sees `_0__` as an unclosed `__`
-        // pair and appends `__`; a second pass then sees `_0____` and adds
-        // another `_`. Not yet fixed — kept here as the canonical reproducer
-        // when the italic-layer gates get their dedicated redesign pass.
+        // Regression 0150: `italic_double_underscore` sees `_0__` as an
+        // unclosed `__` pair, `handle_half_complete_underscore` treats `_0__`
+        // 's final `_` as half-closer and appends `_` — the run grows forever
+        // because `_` at 2 stays `prev == '_'` and `find_first_single_*` skips
+        // it (`_0__` → `_0___` → `_0____` → ...).
+        (
+            "_0__",
+            only(|o| {
+                o.italic = true;
+            }),
+        ),
+        // Regression 0151: italic_asterisk on `"*>\*"` — a `\*` hides the
+        // whole trailing `*` run from the counter (members after the first
+        // get `prev == '*'` skipped), so a single odd-count `*` at index 0
+        // keeps the parity odd and italic re-appends on every pass
+        // (`*>\*` → `*>\**` → `*>\***` → *).
+        (
+            "*>\\*",
+            only(|o| {
+                o.italic = true;
+            }),
+        ),
     ];
 
     for (input, opts) in seeds {

@@ -632,6 +632,17 @@ pub(crate) fn handle_italic_asterisk_with_ranges<'a>(
                 return Cow::Borrowed(text);
             }
         }
+        // A trailing `*` preceded by an unescaped `\` is escaped — the counter
+        // skips it, so the italic run that includes it is invisible.
+        // Appending `*` extends an invisible run (proptest `"*>\*"`:
+        // `"*>\*"` → `"*>\**"` → `"*>\***"` → …). Leave the text alone.
+        if text.ends_with('*') && text.len() >= 2 {
+            let bytes = text.as_bytes();
+            let before_last = bytes[bytes.len() - 2];
+            if before_last == b'\\' && !is_escaped(bytes, bytes.len() - 2) {
+                return Cow::Borrowed(text);
+            }
+        }
         return cow_append(text, "*");
     }
 
@@ -683,6 +694,18 @@ pub(crate) fn handle_italic_underscore_with_ranges<'a>(
         // idempotency), so insert `_` before the `*` instead.
         if let Some(result) = handle_trailing_single_asterisk_for_underscore(text) {
             return Cow::Owned(result);
+        }
+        // A trailing `_` that immediately follows `_` or an escaped `\` would
+        // extend an inert run: the counter skips `prev == '_'` members and any
+        // escaped opener, so two trailing `_`s already form a complete double
+        // (`_0__` → `_0___` → `_0____`… — italic never converges). The closer
+        // is the trailing `_` itself; leave the text alone.
+        if text.ends_with('_') && text.len() >= 2 && {
+            let before = &text.as_bytes()[..text.len() - 1];
+            before.last() == Some(&b'_')
+                || (before.last() == Some(&b'\\') && !is_escaped(text.as_bytes(), text.len() - 2))
+        } {
+            return Cow::Borrowed(text);
         }
         return insert_closing_underscore(text);
     }
